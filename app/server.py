@@ -3,6 +3,7 @@
     python server.py               # 通常起動
     python server.py --no-browser  # ブラウザを開かない
     python server.py --port 8800   # ポートを指定
+    python server.py --lan         # iPad など同じ Wi-Fi の機器からも使う（パスコード必須）
 
 データの場所は環境変数 YAKUSHI_FLASH_DIR で変更できる。
 """
@@ -24,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flashcards import APP_ID, VERSION, cloze, db, io_json, srs, stats, storage  # noqa: E402
+from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, srs, stats, storage  # noqa: E402
 from flashcards.bulk import parse_bulk  # noqa: E402
 from flashcards.subjects import SUBJECTS  # noqa: E402
 
@@ -37,11 +38,13 @@ CSRF_HEADER = "X-Yakushi-Flash"
 class App:
     """サーバー全体で共有する状態。SQLite へのアクセスはロックで1本化する。"""
 
-    def __init__(self, db_file: Path):
+    def __init__(self, db_file: Path, lan_mode: bool = False):
         self.db_file = db_file
         self.conn = db.connect(db_file, threadsafe=True)
         self.lock = threading.Lock()
         self.store = db.Store(self.conn)
+        self.lan = lan_mode
+        self.auth = lan.LanAuth(db_file.parent / lan.SETTINGS_NAME) if lan_mode else None
 
     @property
     def backups(self) -> Path:
@@ -78,8 +81,26 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 共通 ----
     def _host_ok(self) -> bool:
-        host = (self.headers.get("Host") or "").lower()
-        return host in {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+        return lan.host_allowed(self.headers.get("Host") or "", self.port, self.app.lan)
+
+    def _client_ip(self) -> str:
+        return self.client_address[0]
+
+    def _is_local(self) -> bool:
+        """この PC 自身からのアクセスか（PC からはパスコード不要）。"""
+        return lan.is_loopback(self._client_ip())
+
+    def _cookie(self, name: str) -> str | None:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return None
+
+    def _authorized(self) -> bool:
+        if self._is_local():
+            return True
+        return bool(self.app.auth and self.app.auth.check(self._cookie(lan.COOKIE_NAME)))
 
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(status)
@@ -121,6 +142,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/"):
                 if method != "GET" and self.headers.get(CSRF_HEADER) != "1":
                     raise ApiError(403, "許可されていないアクセスです")
+                name = path[len("/api/"):].strip("/")
+                if name not in ("ping", "login") and not self._authorized():
+                    return self._json({"error": "パスコードを入力してください", "auth": True}, 401)
                 body = self._body() if method in ("POST", "PUT") else {}
                 with self.app.lock:
                     self._api(method, path[len("/api/"):].strip("/").split("/"), query, body)
@@ -173,16 +197,28 @@ class Handler(BaseHTTPRequestHandler):
         route = (method, parts[0] if parts else "")
 
         if route == ("GET", "ping"):
-            return self._json({"app": APP_ID, "version": VERSION})
+            return self._json({"app": APP_ID, "version": VERSION, "lan": app.lan})
+
+        if route == ("POST", "login"):
+            return self._login(body)
 
         if route == ("GET", "meta"):
-            return self._json({
+            meta = {
                 "app": APP_ID, "version": VERSION, "subjects": SUBJECTS,
                 "intervals": srs.INTERVALS, "mature_days": srs.MATURE_DAYS,
                 "mature_stage": srs.MATURE_STAGE, "day_boundary_hour": srs.DAY_BOUNDARY_HOUR,
                 "today": st.today().isoformat(), "db_path": str(app.db_file),
-                "backup_dir": str(app.backups),
-            })
+                "backup_dir": str(app.backups), "lan": app.lan, "is_local": self._is_local(),
+            }
+            if app.lan and self._is_local():
+                meta["passcode"] = app.auth.passcode
+                meta["lan_urls"] = [f"http://{ip}:{self.port}/" for ip in lan.local_ips()]
+            return self._json(meta)
+
+        if route == ("POST", "lan") and parts[1:] == ["passcode"]:
+            if not (app.lan and self._is_local()):
+                raise ApiError(403, "パスコードの変更は PC からだけできます")
+            return self._json({"passcode": app.auth.change_passcode()})
 
         if route == ("GET", "dashboard"):
             return self._json(stats.dashboard(conn, st.today()))
@@ -233,6 +269,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(result)
 
         raise ApiError(404, "見つかりません")
+
+    def _login(self, body: dict):
+        auth = self.app.auth
+        if auth is None:
+            raise ApiError(400, "iPad から使うモードで起動していません")
+        client = self._client_ip()
+        wait = auth.locked_for(client)
+        if wait:
+            raise ApiError(429, f"間違いが続いたため、あと{(wait + 59) // 60}分ほど待ってから入力してください")
+        token = auth.login(client, str(body.get("passcode", "")))
+        if token is None:
+            if auth.locked_for(client):
+                raise ApiError(429, f"間違いが続いたため、{lan.LOCK_SECONDS // 60}分ほど待ってから入力してください")
+            raise ApiError(403, "パスコードが違います")
+        cookie = (f"{lan.COOKIE_NAME}={token}; Max-Age={lan.COOKIE_MAX_AGE}; Path=/; "
+                  "HttpOnly; SameSite=Strict")
+        return self._json({"ok": True}, 200, {"Set-Cookie": cookie})
 
     def _cards(self, method: str, rest: list[str], q: dict, body: dict):
         st = self.app.store
@@ -285,35 +338,43 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(404, "見つかりません")
 
 
-def already_running(port: int) -> bool:
+def running_instance(port: int) -> dict | None:
+    """すでに起動しているこのアプリの情報（なければ None）。"""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1) as r:
-            return json.loads(r.read().decode("utf-8")).get("app") == APP_ID
+            info = json.loads(r.read().decode("utf-8"))
+            return info if info.get("app") == APP_ID else None
     except Exception:
-        return False
+        return None
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="薬剤師国試 フラッシュカード")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--lan", action="store_true", help="同じ Wi-Fi の機器（iPad など）からも使う")
     args = ap.parse_args(argv)
 
-    if already_running(args.port):
+    running = running_instance(args.port)
+    if running:
+        if args.lan and not running.get("lan"):
+            print("PC 専用モード（start.bat）ですでに起動しています。")
+            print("iPad から使うには、いま開いている黒い画面を閉じてから start_ipad.bat を起動してください。")
+            return 1
         print("すでに起動しています。ブラウザで開きます。")
         if not args.no_browser:
             webbrowser.open(f"http://127.0.0.1:{args.port}/")
         return 0
 
     db_file = storage.db_path()
-    app = App(db_file)
+    app = App(db_file, lan_mode=args.lan)
     auto = storage.auto_backup(app.conn, app.backups)
 
     server = None
     port = args.port
     for port in range(args.port, args.port + 20):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            server = ThreadingHTTPServer(("0.0.0.0" if args.lan else "127.0.0.1", port), Handler)
             break
         except OSError:
             continue
@@ -331,6 +392,18 @@ def main(argv=None) -> int:
     print(f"  データファイル: {db_file}")
     if auto:
         print(f"  自動バックアップ: {auto.name}")
+    if args.lan:
+        ips = lan.local_ips()
+        print("-" * 60)
+        print(" iPad から使うモード（同じ Wi-Fi の機器から開けます）")
+        if ips:
+            for ip in ips:
+                print(f"  iPad の Safari で開くアドレス: http://{ip}:{port}/")
+        else:
+            print("  この PC のアドレスが見つかりませんでした。Wi-Fi につながっているか確認してください。")
+        print(f"  パスコード: {app.auth.passcode}")
+        print("  ※初回は Windows のファイアウォールの確認が出ます。「プライベート ネットワーク」に")
+        print("    チェックを入れて「アクセスを許可する」を押してください。")
     print("  終了するには、この黒い画面を閉じるか Ctrl+C を押してください。")
     print("=" * 60)
     if not args.no_browser:

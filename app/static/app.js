@@ -34,6 +34,7 @@ async function api(method, path, body) {
   try { res = await fetch("/api/" + path, opt); }
   catch { throw new Error("アプリに接続できません。黒い画面（サーバー）が閉じていないか確認してください"); }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && data.auth) { showLogin(); throw new Error(data.error); }
   if (!res.ok) throw new Error(data.error || `エラー（${res.status}）`);
   return data;
 }
@@ -119,6 +120,7 @@ function wrapCloze(ta) {
 const PAGES = { today: pageToday, study: pageStudy, add: pageAdd, cards: pageCards, stats: pageStats, weak: pageWeak, data: pageData };
 
 async function route() {
+  if (loginShown) return;
   const { page, params } = parseHash();
   const fn = PAGES[page] || pageToday;
   document.querySelectorAll("#tabs a").forEach(a => a.classList.toggle("active", a.dataset.page === page));
@@ -231,7 +233,7 @@ async function pageStudy(params) {
     </div>
     <div class="progress"><i id="prog" style="width:0"></i></div>
     <div id="stage"></div>
-    <div class="hint-keys"><kbd>Space</kbd> 答えを表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
+    <div class="hint-keys keys-only"><kbd>Space</kbd> 答えを表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
   </div>`);
   $main.append(wrap);
   wrap.querySelector("#subj").addEventListener("change", e => go("study", e.target.value ? { subject: e.target.value } : null));
@@ -288,6 +290,7 @@ async function pageStudy(params) {
       <div class="row" style="justify-content:center;margin-top:10px"><button class="btn small" id="edit">このカードを編集</button></div>
     </div>`));
     stageEl.querySelector("#show")?.addEventListener("click", reveal);
+    if (!revealed) stageEl.querySelector(".flash").addEventListener("click", reveal);   // カードをタップしても表示
     stageEl.querySelectorAll("[data-r]").forEach(b => b.addEventListener("click", () => rate(b.dataset.r)));
     stageEl.querySelector("#edit").addEventListener("click", edit);
     (stageEl.querySelector("#show") || stageEl.querySelector("[data-r]"))?.blur();
@@ -622,8 +625,20 @@ async function pageWeak(params) {
 /* ---------- データ ---------- */
 async function pageData() {
   const m = await api("GET", "meta");
+  const ipad = !m.is_local ? `<div class="panel"><h2>iPad から使用中</h2>
+      <p class="sub">データは PC の下のファイルに保存されています。バックアップや取り込みも PC のファイルに対して行われます。</p></div>`
+    : m.lan ? `<div class="panel"><h2>iPad から使う</h2>
+      <p class="sub">iPad を PC と同じ Wi-Fi につなぎ、Safari で次のアドレスを開いて、パスコードを入力してください。</p>
+      ${(m.lan_urls || []).length ? m.lan_urls.map(u => `<div class="path" style="margin:4px 0">${esc(u)}</div>`).join("")
+        : `<p class="r-again">この PC の Wi-Fi のアドレスが見つかりませんでした。Wi-Fi につながっているか確認してください。</p>`}
+      <div class="row" style="margin-top:10px"><span class="sub">パスコード</span><span class="passcode" id="code">${esc(m.passcode)}</span>
+        <button class="btn small" id="newcode">パスコードを変更する</button></div>
+      <p class="sub">パスコードを変更すると、登録済みの iPad はすべて入力し直しになります（iPad をなくしたときなど）。</p></div>`
+    : `<div class="panel"><h2>iPad から使うには</h2>
+      <p class="sub">いまは PC 専用モードで起動しています。黒い画面を閉じ、<b>start_ipad.bat</b> で起動し直すと、同じ Wi-Fi の iPad から使えます（パスコード付き）。</p></div>`;
   $main.append(h(`<div>
     <h1>データ（バックアップ・書き出し・取り込み）</h1>
+    ${ipad}
     <div class="panel"><h2>データファイルの場所</h2>
       <div class="path">${esc(m.db_path)}</div>
       <p class="sub">カードと評価の履歴はすべてこの1つのファイルに入っています。このファイルをコピーすればバックアップになります。</p>
@@ -653,6 +668,10 @@ async function pageData() {
     </div>
     <p class="sub" style="margin-top:16px">バージョン ${esc(m.version)}</p>
   </div>`));
+  $main.querySelector("#newcode")?.addEventListener("click", async () => {
+    if (!confirm("パスコードを変更します。登録済みの iPad はすべて新しいパスコードの入力が必要になります。よろしいですか？")) return;
+    try { const r = await api("POST", "lan/passcode", {}); $main.querySelector("#code").textContent = r.passcode; toast("パスコードを変更しました"); } catch (e) { fail(e); }
+  });
   $main.querySelector("#bk").addEventListener("click", async () => {
     try { const r = await api("POST", "backup", {}); toast("バックアップを作りました：" + r.path.split(/[\\/]/).pop()); } catch (e) { fail(e); }
   });
@@ -678,9 +697,36 @@ async function pageData() {
   });
 }
 
+/* ---------- パスコード入力（iPad など PC 以外から開いたとき） ---------- */
+let loginShown = false;
+function showLogin() {
+  if (loginShown) return;
+  loginShown = true;
+  keyHandler = null;
+  document.getElementById("tabs").style.visibility = "hidden";
+  $main.innerHTML = "";
+  $main.append(h(`<div class="panel login">
+    <h1>パスコードを入力</h1>
+    <p class="sub">PC の黒い画面、または PC で開いたアプリの「データ」画面に表示されている6桁の数字です。<br>
+      一度入力すれば、この端末では次回から入力不要です。</p>
+    <form id="lf" class="row" autocomplete="off">
+      <input type="text" id="pc" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" aria-label="パスコード">
+      <button class="btn primary big">入る</button></form>
+    <p class="errors" id="lerr" style="padding:0"></p></div>`));
+  const $pc = $main.querySelector("#pc");
+  $pc.focus();
+  $main.querySelector("#lf").addEventListener("submit", async e => {
+    e.preventDefault();
+    try {
+      await api("POST", "login", { passcode: $pc.value });
+      location.reload();
+    } catch (err) { $main.querySelector("#lerr").textContent = err.message; $pc.select(); }
+  });
+}
+
 /* ---------- 起動 ---------- */
 (async function init() {
   try { META = await api("GET", "meta"); }
-  catch (e) { $main.innerHTML = `<div class="panel empty">${esc(e.message)}</div>`; return; }
+  catch (e) { if (!loginShown) $main.innerHTML = `<div class="panel empty">${esc(e.message)}</div>`; return; }
   route();
 })();

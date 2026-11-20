@@ -244,3 +244,21 @@ ol.steps li { margin: 3px 0; }
   .flash .q, .flash .a { font-size: 17px; padding: 16px; }
   .rate { min-width: 0; flex: 1; }
 }
+
+/* ---- パスコード ---- */
+.login { max-width: 520px; margin: 40px auto; }
+.login input { font-size: 28px; letter-spacing: .3em; width: 9em; text-align: center; font-variant-numeric: tabular-nums; }
+.passcode { font-size: 26px; font-weight: 700; letter-spacing: .2em; font-variant-numeric: tabular-nums; }
+
+/* ---- タッチ操作（iPad など） ---- */
+@media (pointer: coarse) {
+  .keys-only, .rate kbd, #show kbd { display: none; }
+  .btn { min-height: 40px; }
+  .btn.small { min-height: 34px; padding: 5px 12px; }
+  .rate { min-width: 0; flex: 1; max-width: 220px; padding: 14px 10px; }
+  .rate .sym { font-size: 30px; }
+  .rate .when { font-size: 13px; }
+  .tabs a { padding: 14px 12px 12px; }
+  .flash { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  input[type=text], input[type=search], select, textarea { font-size: 16px; }  /* iPad の自動ズーム防止 */
+}

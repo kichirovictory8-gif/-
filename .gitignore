@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# 学習データは「ドキュメント\yakushi-flash」に置かれるが、念のため
+*.db
+*.db-journal

@@ -93,18 +93,6 @@ function isTyping(e) {
   return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
 }
 
-/* 穴埋めのプレビュー（サーバー側 cloze.py と同じ規則） */
-const CLOZE_RE = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
-function renderQuestion(text) {
-  let out = "", pos = 0;
-  for (const m of text.matchAll(CLOZE_RE)) {
-    out += esc(text.slice(pos, m.index)).replace(/\n/g, "<br>");
-    out += `<span class="cloze">[${m[3] ? esc(m[3]) : "&hellip;"}]</span>`;
-    pos = m.index + m[0].length;
-  }
-  return out + esc(text.slice(pos)).replace(/\n/g, "<br>");
-}
-
 /* 選択範囲を {{cN::…}} で囲む（Alt+C） */
 function wrapCloze(ta) {
   const nums = [...ta.value.matchAll(/\{\{c(\d+)::/g)].map(m => +m[1]);
@@ -114,6 +102,217 @@ function wrapCloze(ta) {
   ta.setRangeText(ins, s, e, "end");
   if (!sel) ta.setSelectionRange(s + ins.length - 2, s + ins.length - 2);
   ta.dispatchEvent(new Event("input"));
+}
+
+/* ---------- 画像 ---------- */
+const IMG_MAX = 1600, THUMB_MAX = 240;
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve({ img, url });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像を読み込めませんでした（対応していない形式かもしれません）")); };
+    img.src = url;
+  });
+}
+function drawScaled(img, max, png, quality = 0.88) {
+  const r = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * r)), hgt = Math.max(1, Math.round(img.naturalHeight * r));
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = hgt;
+  const ctx = cv.getContext("2d");
+  if (!png) { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, hgt); }   // 透明部分を白に
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, 0, 0, w, hgt);
+  return { url: cv.toDataURL(png ? "image/png" : "image/jpeg", quality), w, h: hgt };
+}
+/* 画像ファイルを縮小（長い辺 1600px まで）してサーバーに登録し、id を返す */
+async function uploadImage(file) {
+  if (!file.type.startsWith("image/")) throw new Error("画像ファイルを選んでください");
+  const { img, url } = await loadImage(file);
+  try {
+    const png = file.type === "image/png" || file.type === "image/gif";   // スクリーンショットや図は PNG のまま
+    const main = drawScaled(img, IMG_MAX, png);
+    const thumb = drawScaled(img, THUMB_MAX, false, 0.8);
+    const r = await api("POST", "images", { data: main.url, thumb: thumb.url, width: main.w, height: main.h });
+    return r.id;
+  } finally { URL.revokeObjectURL(url); }
+}
+function imageFiles(list) { return [...(list || [])].filter(f => f.type && f.type.startsWith("image/")); }
+
+/* ---------- 画像の穴埋め（四角形）の編集 ---------- */
+function openMaskEditor(imgId, rects, onDone) {
+  const dlg = document.createElement("dialog");
+  dlg.className = "modal wide";
+  dlg.innerHTML = `<div class="mh"><b>画像の穴埋め</b>
+      <span class="sub">ドラッグで四角形を描くと、その部分が隠れます。四角形はドラッグで移動、右下の角で大きさを変更</span>
+      <span class="spacer"></span><button class="btn small" data-a="cancel">キャンセル</button><button class="btn small primary" data-a="done">完了</button></div>
+    <div class="mb"><div class="me-wrap"><div class="me-stage"><img src="/api/images/${imgId}" alt="" draggable="false"><div class="me-layer"></div></div></div>
+      <div class="row me-tools">
+        <label class="field" style="flex:1;min-width:200px">選んだ四角形のヒント（任意・空なら塗りつぶすだけ）
+          <input type="text" id="mh" maxlength="40" placeholder="例：官能基" disabled></label>
+        <button class="btn small danger" data-a="del" disabled>この四角形を消す</button>
+        <button class="btn small" data-a="clear">全部消す</button>
+        <span class="sub" id="mc"></span></div></div>`;
+  document.body.append(dlg);
+  const layer = dlg.querySelector(".me-layer"), $hint = dlg.querySelector("#mh"), $del = dlg.querySelector("[data-a=del]");
+  let rs = (rects || []).map(r => ({ ...r })), sel = -1, drag = null;
+  const clamp = (v, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v));
+  const pct = v => (v * 100).toFixed(3) + "%";
+
+  function render() {
+    layer.innerHTML = rs.map((r, i) => `<div class="me-rect ${i === sel ? "sel" : ""}" data-i="${i}"
+        style="left:${pct(r.x)};top:${pct(r.y)};width:${pct(r.w)};height:${pct(r.h)}">
+        <span class="me-hint">${esc(r.hint || "")}</span><span class="me-no">${i + 1}</span><span class="me-handle" data-h="${i}"></span></div>`).join("");
+    $hint.disabled = $del.disabled = sel < 0;
+    if (document.activeElement !== $hint) $hint.value = sel >= 0 ? (rs[sel].hint || "") : "";
+    dlg.querySelector("#mc").textContent = `四角形 ${rs.length}個`;
+  }
+  const pt = e => { const b = layer.getBoundingClientRect(); return { x: clamp((e.clientX - b.left) / b.width), y: clamp((e.clientY - b.top) / b.height) }; };
+  layer.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    layer.setPointerCapture(e.pointerId);
+    const p = pt(e), hd = e.target.closest("[data-h]"), rc = e.target.closest("[data-i]");
+    if (hd) { sel = +hd.dataset.h; drag = { mode: "resize", start: p, orig: { ...rs[sel] } }; }
+    else if (rc) { sel = +rc.dataset.i; drag = { mode: "move", start: p, orig: { ...rs[sel] } }; }
+    else { rs.push({ x: p.x, y: p.y, w: 0, h: 0, hint: "" }); sel = rs.length - 1; drag = { mode: "new", start: p }; }
+    $hint.blur();
+    render();
+  });
+  layer.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const p = pt(e), r = rs[sel], dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+    if (drag.mode === "new") {
+      r.x = Math.min(drag.start.x, p.x); r.y = Math.min(drag.start.y, p.y);
+      r.w = Math.abs(dx); r.h = Math.abs(dy);
+    } else if (drag.mode === "move") {
+      r.x = clamp(drag.orig.x + dx, 0, 1 - r.w); r.y = clamp(drag.orig.y + dy, 0, 1 - r.h);
+    } else {
+      r.w = clamp(drag.orig.w + dx, 0.01, 1 - r.x); r.h = clamp(drag.orig.h + dy, 0.01, 1 - r.y);
+    }
+    render();
+  });
+  const end = () => {
+    if (!drag) return;
+    if (drag.mode === "new" && (rs[sel].w < 0.01 || rs[sel].h < 0.01)) { rs.splice(sel, 1); sel = -1; }
+    drag = null;
+    render();
+  };
+  layer.addEventListener("pointerup", end);
+  layer.addEventListener("pointercancel", end);
+  $hint.addEventListener("input", () => { if (sel >= 0) { rs[sel].hint = $hint.value; render(); } });
+  $del.addEventListener("click", () => { if (sel >= 0) { rs.splice(sel, 1); sel = -1; render(); } });
+  dlg.querySelector("[data-a=clear]").addEventListener("click", () => {
+    if (rs.length && confirm("この画像の四角形をすべて消します。よろしいですか？")) { rs = []; sel = -1; render(); }
+  });
+  dlg.addEventListener("keydown", e => {   // Delete / Backspace で選んだ四角形を消す（ヒント入力中は除く）
+    if ((e.key === "Delete" || e.key === "Backspace") && e.target !== $hint && sel >= 0) {
+      e.preventDefault(); rs.splice(sel, 1); sel = -1; render();
+    }
+  });
+  dlg.querySelector("[data-a=cancel]").addEventListener("click", () => dlg.close());
+  dlg.querySelector("[data-a=done]").addEventListener("click", () => { onDone(rs.filter(r => r.w >= 0.01 && r.h >= 0.01)); dlg.close(); });
+  dlg.addEventListener("close", () => dlg.remove());
+  render();
+  dlg.showModal();
+}
+
+/* ---------- 表面・裏面の入力欄（追加・編集で共通） ---------- */
+function cardForm(el, init = {}) {
+  let masks = JSON.parse(JSON.stringify(init.masks || {}));
+  el.innerHTML = `
+    <div class="field-head"><b>表面</b><span class="muted">穴埋め {{c1::語句}} / {{c1::語句::ヒント}}</span><span class="spacer"></span>
+      <button type="button" class="btn small" data-a="cloze">選んだ語句を穴埋め <kbd>Alt</kbd>+<kbd>C</kbd></button>
+      <button type="button" class="btn small" data-a="img" data-side="front">画像を追加</button></div>
+    <textarea class="cf-front" rows="4" placeholder="例：β1受容体を刺激すると心拍数は{{c1::増加::増減}}する"></textarea>
+    <div class="sub cf-cap">プレビュー<span class="cf-imgnote" hidden>　—　<b>画像をクリック（タップ）すると、画像の上に穴を作れます</b></span></div>
+    <div class="preview cf-pv-front"></div>
+    <div class="field-head" style="margin-top:14px"><b>裏面</b><span class="muted">説明・解説（穴埋めカードなら省略可）</span><span class="spacer"></span>
+      <button type="button" class="btn small" data-a="img" data-side="back">画像を追加</button></div>
+    <textarea class="cf-back" rows="4"></textarea>
+    <div class="preview cf-pv-back" hidden></div>
+    <p class="sub" style="margin:6px 0 0">画像は、スクリーンショットを <kbd>Ctrl</kbd>+<kbd>V</kbd> で貼り付けるか、ファイルを入力欄にドラッグしても入れられます。</p>
+    <input type="file" class="cf-file" accept="image/*" multiple hidden>`;
+  const $f = el.querySelector(".cf-front"), $b = el.querySelector(".cf-back");
+  const $pf = el.querySelector(".cf-pv-front"), $pb = el.querySelector(".cf-pv-back"), $file = el.querySelector(".cf-file");
+  $f.value = init.front || ""; $b.value = init.back || "";
+  let timer = null, seq = 0, fileSide = "front";
+
+  async function preview() {
+    const my = ++seq;
+    if (!$f.value.trim() && !$b.value.trim()) {
+      $pf.innerHTML = '<span class="muted">（入力するとここに表示）</span>'; $pb.hidden = true;
+      el.querySelector(".cf-imgnote").hidden = true; return;
+    }
+    try {
+      const r = await api("POST", "render", { front: $f.value, back: $b.value, masks });
+      if (my !== seq) return;
+      $pf.innerHTML = r.question_html || '<span class="muted">（表面が空です）</span>';
+      $pb.innerHTML = r.back_html; $pb.hidden = !$b.value.trim();
+      el.querySelector(".cf-imgnote").hidden = !r.image_ids.length;
+      $pf.querySelectorAll(".card-img").forEach(im => im.addEventListener("error", () => im.replaceWith(h(`<span class="r-again">［画像が見つかりません］</span>`))));
+    } catch (e) { fail(e); }
+  }
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(preview, 200); };
+  $f.addEventListener("input", schedule);
+  $b.addEventListener("input", schedule);
+
+  // 画像の上の穴の編集
+  $pf.addEventListener("click", e => {
+    const t = e.target.closest("[data-img]");
+    if (!t) return;
+    const id = t.dataset.img;
+    openMaskEditor(id, masks[id] || [], rects => {
+      if (rects.length) masks[id] = rects; else delete masks[id];
+      preview();
+    });
+  });
+
+  // 画像の追加
+  function insertToken(ta, id) {
+    const v = ta.value, a = ta.selectionStart ?? v.length, b = ta.selectionEnd ?? v.length;
+    const before = a > 0 && v[a - 1] !== "\n" ? "\n" : "";
+    const after = b < v.length && v[b] !== "\n" ? "\n" : "";
+    ta.setRangeText(`${before}[[img:${id}]]${after}`, a, b, "end");
+    ta.dispatchEvent(new Event("input"));
+  }
+  async function addFiles(files, ta) {
+    files = imageFiles(files);
+    if (!files.length) return;
+    toast(files.length > 1 ? `画像を${files.length}枚取り込み中…` : "画像を取り込み中…");
+    for (const f of files) {
+      try { insertToken(ta, await uploadImage(f)); } catch (e) { fail(e); return; }
+    }
+    toast(files.length > 1 ? `画像を${files.length}枚追加しました` : "画像を追加しました");
+  }
+  for (const ta of [$f, $b]) {
+    ta.addEventListener("paste", e => {
+      const files = imageFiles(e.clipboardData && e.clipboardData.files);
+      if (files.length) { e.preventDefault(); addFiles(files, ta); }
+    });
+    ta.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); ta.classList.add("drop"); } });
+    ta.addEventListener("dragleave", () => ta.classList.remove("drop"));
+    ta.addEventListener("drop", e => {
+      ta.classList.remove("drop");
+      const files = imageFiles(e.dataTransfer && e.dataTransfer.files);
+      if (files.length) { e.preventDefault(); ta.focus(); addFiles(files, ta); }
+    });
+  }
+  el.querySelectorAll("[data-a=img]").forEach(btn => btn.addEventListener("click", () => { fileSide = btn.dataset.side; $file.click(); }));
+  $file.addEventListener("change", () => { addFiles($file.files, fileSide === "back" ? $b : $f); $file.value = ""; });
+  const clozeBtn = el.querySelector("[data-a=cloze]");
+  clozeBtn.addEventListener("mousedown", e => e.preventDefault());   // 選択を保ったまま
+  clozeBtn.addEventListener("click", () => { $f.focus(); wrapCloze($f); });
+  el.addEventListener("keydown", e => {
+    if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") { e.preventDefault(); wrapCloze(e.target); }
+  });
+  preview();
+  return {
+    get: () => ({ front: $f.value, back: $b.value, masks }),
+    reset() { $f.value = ""; $b.value = ""; masks = {}; preview(); },
+    focus() { $f.focus(); },
+  };
 }
 
 /* ---------- ルーター ---------- */
@@ -130,7 +329,7 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 document.addEventListener("keydown", e => {
-  if (document.getElementById("modal").open) return;
+  if (document.querySelector("dialog[open]")) return;   // 編集・穴の編集の画面を開いている間は無効
   if (keyHandler) keyHandler(e);
 });
 
@@ -233,7 +432,7 @@ async function pageStudy(params) {
     </div>
     <div class="progress"><i id="prog" style="width:0"></i></div>
     <div id="stage"></div>
-    <div class="hint-keys keys-only"><kbd>Space</kbd> 答えを表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
+    <div class="hint-keys keys-only"><kbd>Space</kbd> 次の穴を開ける／答えを表示　<kbd>Enter</kbd> 全部表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
   </div>`);
   $main.append(wrap);
   wrap.querySelector("#subj").addEventListener("change", e => go("study", e.target.value ? { subject: e.target.value } : null));
@@ -275,25 +474,52 @@ async function pageStudy(params) {
     }
     const c = current;
     stageEl.append(h(`<div>
-      <div class="flash">
+      <div class="flash ${revealed ? "revealed" : ""}">
         <div class="meta"><span class="tag accent">${esc(c.subject)}</span>${c.unit ? `<span>${esc(c.unit)}</span>` : ""}
-          <span class="spacer"></span>
+          <span class="spacer"></span><span class="sub" id="holes"></span>
           ${c.kind === "recheck" ? `<span class="tag warn">再確認</span>` : `<span class="tag">${intervalLabel(c.stage)}</span>`}
           <span class="muted">周回 ${c.reps}</span></div>
-        <div class="q">${revealed ? c.answer_html : c.question_html}</div>
+        <div class="q">${c.question_html}</div>
         <div class="a">${revealed ? c.back_html : ""}</div>
       </div>
       <div class="answer-bar">${revealed
         ? ["good", "fair", "again"].map((r, i) => `<button class="btn rate ${r}" data-r="${r}">
               <span class="sym">${RATING[r].sym}</span><span class="when"><kbd>${i + 1}</kbd> ${nextWhen(r)}</span></button>`).join("")
-        : `<button class="btn primary big" id="show">答えを表示 <kbd>Space</kbd></button>`}</div>
+        : `<span id="pre"></span>`}</div>
       <div class="row" style="justify-content:center;margin-top:10px"><button class="btn small" id="edit">このカードを編集</button></div>
     </div>`));
-    stageEl.querySelector("#show")?.addEventListener("click", reveal);
-    if (!revealed) stageEl.querySelector(".flash").addEventListener("click", reveal);   // カードをタップしても表示
+    holes = [...stageEl.querySelectorAll(".q .cl, .q .mask")];
+    if (revealed) holes.forEach(x => x.classList.add("open"));
+    holes.forEach(x => x.addEventListener("click", e => { e.stopPropagation(); openHole(x); }));
+    if (!revealed) stageEl.querySelector(".flash").addEventListener("click", openNext);   // カードをタップすると次の穴
     stageEl.querySelectorAll("[data-r]").forEach(b => b.addEventListener("click", () => rate(b.dataset.r)));
     stageEl.querySelector("#edit").addEventListener("click", edit);
-    (stageEl.querySelector("#show") || stageEl.querySelector("[data-r]"))?.blur();
+    stageEl.querySelectorAll(".q .card-img").forEach(im => im.addEventListener("error", () => im.replaceWith(h(`<span class="r-again">［画像が見つかりません］</span>`))));
+    updateHoles();
+  }
+  let holes = [];
+  function updateHoles() {
+    const left = holes.filter(x => !x.classList.contains("open")).length;
+    const $h = stageEl.querySelector("#holes");
+    if ($h) $h.textContent = holes.length && !revealed ? `穴 ${holes.length - left}/${holes.length}` : "";
+    const pre = stageEl.querySelector("#pre");
+    if (!pre) return;
+    pre.innerHTML = holes.length
+      ? `<button class="btn primary big" id="next">次を開ける <kbd>Space</kbd></button><button class="btn big" id="all">全部表示 <kbd>Enter</kbd></button>`
+      : `<button class="btn primary big" id="all">答えを表示 <kbd>Space</kbd></button>`;
+    pre.querySelector("#next")?.addEventListener("click", openNext);
+    pre.querySelector("#all").addEventListener("click", reveal);
+  }
+  /* 穴を1つ開ける。全部開いたら裏面と評価ボタンを出す */
+  function openHole(x) {
+    if (revealed || x.classList.contains("open")) return;
+    x.classList.add("open");
+    if (holes.every(y => y.classList.contains("open"))) reveal(); else updateHoles();
+  }
+  function openNext() {
+    if (!current || revealed) return;
+    const next = holes.find(x => !x.classList.contains("open"));
+    if (next) openHole(next); else reveal();
   }
   function reveal() { if (current && !revealed) { revealed = true; render(); } }
   async function rate(r) {
@@ -315,7 +541,7 @@ async function pageStudy(params) {
   }
   keyHandler = e => {
     if (isTyping(e) || e.ctrlKey || e.altKey || e.metaKey) return;
-    if (e.code === "Space" || e.key === " ") { e.preventDefault(); reveal(); }
+    if (e.code === "Space" || e.key === " ") { e.preventDefault(); openNext(); }
     else if (e.key === "Enter" && !revealed) { e.preventDefault(); reveal(); }
     else if (["1", "2", "3"].includes(e.key)) { e.preventDefault(); rate(["good", "fair", "again"][+e.key - 1]); }
     else if (e.key === "e" || e.key === "E") { e.preventDefault(); edit(); }
@@ -352,32 +578,30 @@ async function pageAdd(params) {
 
 function addSingle(body, $s, $u) {
   body.append(h(`<div>
-    <label class="field"><span>表面　<span class="muted">穴埋めは {{c1::語句}} または {{c1::語句::ヒント}}。語句を選んで <kbd>Alt</kbd>+<kbd>C</kbd> で囲めます</span></span>
-      <textarea id="front" rows="4" placeholder="例：β1受容体を刺激すると心拍数は{{c1::増加::増減}}する"></textarea></label>
-    <div class="row" style="margin:6px 0 2px"><button type="button" class="btn small" id="wrap">選んだ語句を穴埋めにする <kbd>Alt</kbd>+<kbd>C</kbd></button><span class="spacer"></span><span class="sub">表面のプレビュー</span></div><div class="preview" id="pv"><span class="muted">（入力するとここに表示）</span></div>
-    <label class="field" style="margin-top:12px"><span>裏面　<span class="muted">穴埋めカードなら省略できます</span></span>
-      <textarea id="back" rows="4"></textarea></label>
+    <div class="cf"></div>
     <div class="row" style="margin-top:12px"><button class="btn primary" id="save">追加する <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
       <span class="sub">追加したカードは今日が期日になります。追加後も科目と系統はそのまま残ります。</span></div>
     <div id="recent" style="margin-top:16px"></div>
   </div>`));
-  const $f = body.querySelector("#front"), $b = body.querySelector("#back"), $pv = body.querySelector("#pv");
+  const form = cardForm(body.querySelector(".cf"));
   const added = [];
-  $f.addEventListener("input", () => { $pv.innerHTML = $f.value.trim() ? renderQuestion($f.value) : '<span class="muted">（入力するとここに表示）</span>'; });
+  let saving = false;
   async function save() {
+    if (saving) return;
+    saving = true;
     try {
       store.set("unit:" + $s.value, $u.value.trim());
-      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, front: $f.value, back: $b.value });
+      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, ...form.get() });
       added.unshift(c);
-      $f.value = ""; $b.value = ""; $f.dispatchEvent(new Event("input")); $f.focus();
+      form.reset(); form.focus();
       toast(`追加しました（${c.subject}${c.unit ? "／" + c.unit : ""}）`);
       renderRecent();
-    } catch (e) { fail(e); }
+    } catch (e) { fail(e); } finally { saving = false; }
   }
   function renderRecent() {
     const el = body.querySelector("#recent");
-    el.innerHTML = added.length ? `<h2>今追加したカード（${added.length}枚）</h2><div class="table-wrap"><table><thead><tr><th>科目</th><th>系統</th><th>表面</th><th></th></tr></thead><tbody>
-      ${added.slice(0, 10).map(c => `<tr><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell">${esc(c.front_plain)}</td>
+    el.innerHTML = added.length ? `<h2>今追加したカード（${added.length}枚）</h2><div class="table-wrap"><table><thead><tr><th></th><th>科目</th><th>系統</th><th>表面</th><th></th></tr></thead><tbody>
+      ${added.slice(0, 10).map(c => `<tr><td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell">${esc(c.front_plain)}</td>
         <td><button class="btn small" data-id="${c.id}">編集</button></td></tr>`).join("")}</tbody></table></div>` : "";
     el.querySelectorAll("[data-id]").forEach(b => b.addEventListener("click", () => openEditor(+b.dataset.id, async ch => {
       const i = added.findIndex(x => x.id === +b.dataset.id);
@@ -386,15 +610,13 @@ function addSingle(body, $s, $u) {
     })));
   }
   body.querySelector("#save").addEventListener("click", save);
-  body.querySelector("#wrap").addEventListener("mousedown", e => e.preventDefault());  // 選択を保ったまま
-  body.querySelector("#wrap").addEventListener("click", () => { $f.focus(); wrapCloze($f); });
-  body.addEventListener("keydown", e => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
-    if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") { e.preventDefault(); wrapCloze(e.target); }
-  });
-  $s.addEventListener("keydown", e => { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); save(); } });
-  $u.addEventListener("keydown", e => { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); save(); } });
-  $f.focus();
+  // 画面のどこにいても Ctrl+Enter で追加（画像の穴の編集を閉じた直後なども）
+  keyHandler = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); } };
+  form.focus();
+}
+
+function thumbTag(c) {
+  return c.thumb_id ? `<img class="thumb" src="/api/images/${c.thumb_id}/thumb" alt="" loading="lazy">` : "";
 }
 
 function addBulk(body, $s, $u) {
@@ -419,7 +641,7 @@ function addBulk(body, $s, $u) {
       $pv.innerHTML = `<div class="sub"><b>${p.count}枚</b> を読み取りました${p.errors.length ? `。<span class="r-again">${p.errors.length}行に問題があります（直すまで追加できません）</span>` : ""}</div>
         ${p.errors.length ? `<ul class="errors">${p.errors.slice(0, 20).map(x => `<li>${x.line}行目：${esc(x.message)}</li>`).join("")}</ul>` : ""}
         ${p.samples.length ? `<div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>表面（最初の5枚）</th><th>裏面</th></tr></thead><tbody>
-          ${p.samples.map(s => `<tr><td>${s.question_html}</td><td>${esc(s.back)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+          ${p.samples.map(s => `<tr><td>${s.question_html}</td><td>${s.back_html}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
       $add.disabled = !p.count || p.errors.length > 0;
       $add.textContent = p.count ? `${p.count}枚を追加する` : "追加する";
     } catch (e) { fail(e); }
@@ -456,7 +678,7 @@ async function pageCards(params) {
         <select id="sort">${options(SORTS, f.sort)}</select>
       </div>
       ${f.unit !== null ? `<div class="row" style="margin-bottom:10px"><span class="tag accent">系統：${esc(f.unit || "（未設定）")}</span><button class="btn small" id="clearUnit">系統の絞り込みを外す</button></div>` : ""}
-      <div class="table-wrap"><table><thead><tr><th>科目</th><th>系統</th><th>表面</th><th>間隔</th><th>期日</th><th class="num">周回</th><th>最後</th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th></th><th>科目</th><th>系統</th><th>表面</th><th>間隔</th><th>期日</th><th class="num">周回</th><th>最後</th></tr></thead>
         <tbody id="rows"></tbody></table></div>
       <div class="pager" id="pager"></div>
     </div></div>`));
@@ -484,10 +706,10 @@ async function pageCards(params) {
     $main.querySelector("#total").textContent = `${res.total}枚`;
     const tb = $main.querySelector("#rows");
     tb.innerHTML = res.items.length ? res.items.map(c => `<tr class="clickable" data-id="${c.id}">
-      <td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell" title="${esc(c.front_plain)}">${esc(c.front_plain)}</td>
+      <td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell" title="${esc(c.front_plain)}">${esc(c.front_plain)}</td>
       <td>${intervalLabel(c.stage)}</td><td>${fmtDate(c.due)} <span class="sub">${relDue(c.due)}</span></td>
       <td class="num">${c.reps}</td><td>${ratingChip(c.last_rating)}</td></tr>`).join("")
-      : `<tr><td colspan="7" class="empty">該当するカードはありません</td></tr>`;
+      : `<tr><td colspan="8" class="empty">該当するカードはありません</td></tr>`;
     tb.querySelectorAll("tr[data-id]").forEach(tr => tr.addEventListener("click", () => openEditor(+tr.dataset.id, () => load())));
     const pg = $main.querySelector("#pager");
     const pages = Math.max(1, Math.ceil(res.total / LIMIT)), cur = Math.floor(offset / LIMIT) + 1;
@@ -513,9 +735,7 @@ async function openEditor(id, onChange) {
       <div class="form-grid" style="margin-bottom:12px">
         <label class="field">科目<select name="subject">${subjectOptions(c.subject)}</select></label>
         <label class="field">系統・単元<input type="text" name="unit" value="${esc(c.unit)}"></label></div>
-      <label class="field"><span>表面　<span class="muted">語句を選んで <kbd>Alt</kbd>+<kbd>C</kbd> で穴埋め</span></span><textarea name="front" rows="4">${esc(c.front)}</textarea></label>
-      <div class="preview" id="epv" style="margin-top:6px">${c.question_html}</div>
-      <label class="field" style="margin-top:12px">裏面<textarea name="back" rows="4">${esc(c.back)}</textarea></label>
+      <div class="cf"></div>
       <h2 style="margin-top:18px">評価の履歴（${hist.length}件）</h2>
       ${hist.length ? `<div class="table-wrap" style="max-height:200px"><table><thead><tr><th>学習日</th><th>日時</th><th>評価</th><th>間隔</th><th></th></tr></thead><tbody>
         ${hist.map(r => `<tr class="${r.before_reset ? "muted" : ""}"><td>${fmtDate(r.review_date)}</td><td class="sub">${esc(r.reviewed_at.replace("T", " "))}</td>
@@ -528,18 +748,17 @@ async function openEditor(id, onChange) {
       <button class="btn" type="button" id="ereset">学習状況をリセット</button>
       <button class="btn danger" type="button" id="edel">削除</button></div></form>`;
   const form = dlg.querySelector("#ef");
-  form.front.addEventListener("input", () => { dlg.querySelector("#epv").innerHTML = renderQuestion(form.front.value); });
+  const cf = cardForm(dlg.querySelector(".cf"), c);
   const close = () => dlg.close();
   async function save() {
     try {
-      await api("PUT", "cards/" + id, { subject: form.subject.value, unit: form.unit.value, front: form.front.value, back: form.back.value });
+      await api("PUT", "cards/" + id, { subject: form.subject.value, unit: form.unit.value, ...cf.get() });
       toast("保存しました"); close(); onChange && onChange("saved");
     } catch (e) { fail(e); }
   }
   form.addEventListener("submit", e => { if (e.submitter && e.submitter.value === "save") { e.preventDefault(); save(); } });
   form.addEventListener("keydown", e => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
-    if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") { e.preventDefault(); wrapCloze(e.target); }
   });
   dlg.querySelector("#ereset").addEventListener("click", async () => {
     if (!confirm("このカードを新規に戻し、今日を期日にします。\n評価の履歴は残りますが、集計（周回数・○△✖・定着率）には数えなくなります。よろしいですか？")) return;
@@ -550,7 +769,7 @@ async function openEditor(id, onChange) {
     try { await api("DELETE", "cards/" + id); toast("削除しました"); close(); onChange && onChange("deleted"); } catch (e) { fail(e); }
   });
   dlg.showModal();
-  form.front.focus();
+  cf.focus();
 }
 
 /* ---------- 科目別・系統別 ---------- */

@@ -103,12 +103,13 @@ class Handler(BaseHTTPRequestHandler):
         return bool(self.app.auth and self.app.auth.check(self._cookie(lan.COOKIE_NAME)))
 
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
+        extra = dict(extra or {})
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", extra.pop("Cache-Control", "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
-        for k, v in (extra or {}).items():
+        for k, v in extra.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -233,6 +234,19 @@ class Handler(BaseHTTPRequestHandler):
         if parts[0] == "cards":
             return self._cards(method, parts[1:], q, body)
 
+        if parts[0] == "images":
+            return self._images(method, parts[1:], body)
+
+        if route == ("POST", "render"):   # 追加・編集画面のプレビュー
+            front = str(body.get("front", ""))
+            masks = cloze.normalize_masks(body.get("masks"), front)
+            return self._json({
+                "question_html": cloze.render_front(front, masks),
+                "back_html": cloze.render_back(str(body.get("back", ""))),
+                "masks": masks,
+                "image_ids": cloze.image_ids(front),
+            })
+
         if route == ("GET", "units"):
             return self._json(st.units(q.get("subject", "")))
 
@@ -287,6 +301,18 @@ class Handler(BaseHTTPRequestHandler):
                   "HttpOnly; SameSite=Strict")
         return self._json({"ok": True}, 200, {"Set-Cookie": cookie})
 
+    def _images(self, method: str, rest: list[str], body: dict):
+        st = self.app.store
+        if not rest and method == "POST":
+            return self._json(st.add_image(body.get("data"), body.get("thumb"),
+                                           _int(body.get("width", 0), "width"),
+                                           _int(body.get("height", 0), "height")), 201)
+        if method == "GET" and 1 <= len(rest) <= 2 and rest[1:] in ([], ["thumb"]):
+            data, mime = st.get_image(_int(rest[0]), thumb=rest[1:] == ["thumb"])
+            # 画像の中身は id ごとに変わらないので、ブラウザに長く覚えさせてよい
+            return self._send(200, data, mime, {"Cache-Control": "private, max-age=31536000, immutable"})
+        raise ApiError(404, "見つかりません")
+
     def _cards(self, method: str, rest: list[str], q: dict, body: dict):
         st = self.app.store
         if not rest:
@@ -301,14 +327,15 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             if method == "POST":
                 card_id = st.add_card(body.get("subject", ""), body.get("unit", ""),
-                                      body.get("front", ""), body.get("back", ""))
+                                      body.get("front", ""), body.get("back", ""), body.get("masks"))
                 return self._json(st.get_card(card_id), 201)
         if rest == ["bulk"] and method == "POST":
             parsed = parse_bulk(str(body.get("text", "")))
             preview = {
                 "count": len(parsed.cards),
                 "errors": [{"line": n, "message": m} for n, m in parsed.errors],
-                "samples": [{"front": f, "back": b, "question_html": cloze.render_question(f)}
+                "samples": [{"front": f, "back": b, "question_html": cloze.render_front(f),
+                             "back_html": cloze.render_back(b)}
                             for f, b in parsed.cards[:5]],
             }
             if body.get("dry_run"):
@@ -325,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(st.get_card(card_id))
             if method == "PUT":
                 st.update_card(card_id, body.get("subject", ""), body.get("unit", ""),
-                               body.get("front", ""), body.get("back", ""))
+                               body.get("front", ""), body.get("back", ""), body.get("masks"))
                 return self._json(st.get_card(card_id))
             if method == "DELETE":
                 st.delete_card(card_id)
@@ -369,6 +396,7 @@ def main(argv=None) -> int:
     db_file = storage.db_path()
     app = App(db_file, lan_mode=args.lan)
     auto = storage.auto_backup(app.conn, app.backups)
+    app.store.cleanup_images()
 
     server = None
     port = args.port

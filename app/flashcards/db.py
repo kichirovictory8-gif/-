@@ -1,6 +1,9 @@
 """SQLite へのアクセス（カード・評価履歴・学習セッション）。"""
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -8,7 +11,7 @@ from pathlib import Path
 from . import cloze, srs
 from .subjects import SUBJECTS, check_subject
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -41,7 +44,52 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, id);
 CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(review_date);
+CREATE TABLE IF NOT EXISTS images (
+    id         INTEGER PRIMARY KEY,
+    sha256     TEXT    NOT NULL UNIQUE,
+    mime       TEXT    NOT NULL,
+    width      INTEGER NOT NULL DEFAULT 0,
+    height     INTEGER NOT NULL DEFAULT 0,
+    data       BLOB    NOT NULL,
+    thumb      BLOB,
+    thumb_mime TEXT,
+    created_at TEXT    NOT NULL
+);
 """
+
+IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_THUMB_BYTES = 512 * 1024
+
+
+def sniff_mime(data: bytes) -> str | None:
+    """先頭のバイト列から画像の種類を判定する（拡張子や申告は信用しない）。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
+
+
+def decode_data_url(value: str, max_bytes: int) -> tuple[bytes, str]:
+    """data:image/png;base64,... または素の base64 を (バイト列, 種類) にする。"""
+    value = str(value or "")
+    if value.startswith("data:"):
+        value = value.split(",", 1)[1] if "," in value else ""
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise ValueError("画像データを読み取れませんでした") from None
+    if len(raw) > max_bytes:
+        raise ValueError(f"画像が大きすぎます（{max_bytes // 1024 // 1024 or 1}MB まで）")
+    mime = sniff_mime(raw)
+    if mime not in IMAGE_MIMES:
+        raise ValueError("対応していない画像形式です（PNG / JPEG / WebP / GIF）")
+    return raw, mime
 
 #: 集計対象の評価（再確認を除き、学習状況リセット後のもの）
 COUNTED_CTE = """
@@ -69,11 +117,20 @@ def connect(path: str | Path, threadsafe: bool = False) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+        "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),)
     )
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """古い版で作ったファイルに、足りない列を追加する（データはそのまま）。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(cards)")}
+    if "masks" not in cols:
+        conn.execute("ALTER TABLE cards ADD COLUMN masks TEXT NOT NULL DEFAULT '{}'")
 
 
 def _clean_text(value, name: str, required: bool) -> str:
@@ -99,8 +156,8 @@ class Store:
         return srs.study_date(self.now())
 
     # ---- カード ----
-    def add_card(self, subject: str, unit: str, front: str, back: str) -> int:
-        card_id = self._add_no_commit(subject, unit, front, back)
+    def add_card(self, subject: str, unit: str, front: str, back: str, masks=None) -> int:
+        card_id = self._add_no_commit(subject, unit, front, back, masks)
         self.conn.commit()
         return card_id
 
@@ -115,32 +172,39 @@ class Store:
             raise
         return ids
 
-    def _add_no_commit(self, subject, unit, front, back) -> int:
-        subject, unit, front, back = self._validate(subject, unit, front, back)
+    def _add_no_commit(self, subject, unit, front, back, masks=None) -> int:
+        subject, unit, front, back, masks = self._validate(subject, unit, front, back, masks)
         now = _iso(self.now())
         cur = self.conn.execute(
-            "INSERT INTO cards(subject, unit, front, back, stage, due, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
-            (subject, unit, front, back, self.today().isoformat(), now, now),
+            "INSERT INTO cards(subject, unit, front, back, masks, stage, due, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            (subject, unit, front, back, masks, self.today().isoformat(), now, now),
         )
         return cur.lastrowid
 
-    @staticmethod
-    def _validate(subject, unit, front, back) -> tuple[str, str, str, str]:
+    def _validate(self, subject, unit, front, back, masks=None) -> tuple[str, str, str, str, str]:
         subject = check_subject(subject)
         unit = _clean_text(unit, "系統・単元", False)
         front = _clean_text(front, "表面", True)
         back = _clean_text(back, "裏面", False)
-        if not back and not cloze.has_cloze(front):
+        masks = cloze.normalize_masks(masks, front)
+        if not back and not cloze.has_cloze(front, masks):
             raise ValueError("裏面を入力してください（表面が穴埋めなら裏面は省略できます）")
-        return subject, unit, front, back
+        ids = set(cloze.image_ids(front)) | set(cloze.image_ids(back))
+        if ids:
+            marks = ",".join("?" * len(ids))
+            found = {r[0] for r in self.conn.execute(f"SELECT id FROM images WHERE id IN ({marks})", list(ids))}
+            missing = sorted(ids - found)
+            if missing:
+                raise ValueError(f"画像が見つかりません: {', '.join(f'[[img:{i}]]' for i in missing)}")
+        return subject, unit, front, back, json.dumps(masks, ensure_ascii=False, separators=(",", ":"))
 
-    def update_card(self, card_id: int, subject: str, unit: str, front: str, back: str) -> None:
+    def update_card(self, card_id: int, subject: str, unit: str, front: str, back: str, masks=None) -> None:
         self._require(card_id)
-        subject, unit, front, back = self._validate(subject, unit, front, back)
+        subject, unit, front, back, masks = self._validate(subject, unit, front, back, masks)
         self.conn.execute(
-            "UPDATE cards SET subject=?, unit=?, front=?, back=?, updated_at=? WHERE id=?",
-            (subject, unit, front, back, _iso(self.now()), card_id),
+            "UPDATE cards SET subject=?, unit=?, front=?, back=?, masks=?, updated_at=? WHERE id=?",
+            (subject, unit, front, back, masks, _iso(self.now()), card_id),
         )
         self.conn.commit()
 
@@ -193,12 +257,18 @@ class Store:
     @staticmethod
     def _card_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
+        try:
+            d["masks"] = json.loads(d.get("masks") or "{}")
+        except ValueError:
+            d["masks"] = {}
         d["interval"] = srs.interval_for(d["stage"])
         d["front_plain"] = cloze.plain(d["front"])
-        d["question_html"] = cloze.render_question(d["front"])
-        d["answer_html"] = cloze.render_answer(d["front"])
-        d["back_html"] = cloze.render_text(d["back"])
-        d["is_cloze"] = cloze.has_cloze(d["front"])
+        d["back_plain"] = cloze.plain(d["back"])
+        d["question_html"] = cloze.render_front(d["front"], d["masks"])
+        d["back_html"] = cloze.render_back(d["back"])
+        d["is_cloze"] = cloze.has_cloze(d["front"], d["masks"])
+        imgs = cloze.image_ids(d["front"]) or cloze.image_ids(d["back"])
+        d["thumb_id"] = imgs[0] if imgs else None
         return d
 
     def list_cards(self, q: str = "", subject: str = "", unit: str | None = None, level: str = "",
@@ -252,6 +322,53 @@ class Store:
         ).fetchone()[0]
         items = self._query_cards(where, params, orders[sort], limit, offset)
         return {"total": total, "items": items}
+
+    # ---- 画像 ----
+    def add_image(self, data_url: str, thumb_url: str | None = None, width: int = 0, height: int = 0) -> dict:
+        """画像を登録して id を返す。同じ画像がすでにあればその id を返す。"""
+        raw, mime = decode_data_url(data_url, MAX_IMAGE_BYTES)
+        thumb, thumb_mime = (None, None)
+        if thumb_url:
+            thumb, thumb_mime = decode_data_url(thumb_url, MAX_THUMB_BYTES)
+        digest = hashlib.sha256(raw).hexdigest()
+        row = self.conn.execute("SELECT id FROM images WHERE sha256 = ?", (digest,)).fetchone()
+        if row:
+            return {"id": row[0], "existing": True}
+        w = max(0, min(int(width or 0), 100000))
+        h = max(0, min(int(height or 0), 100000))
+        cur = self.conn.execute(
+            "INSERT INTO images(sha256, mime, width, height, data, thumb, thumb_mime, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (digest, mime, w, h, raw, thumb, thumb_mime, _iso(self.now())),
+        )
+        self.conn.commit()
+        return {"id": cur.lastrowid, "existing": False}
+
+    def get_image(self, image_id: int, thumb: bool = False) -> tuple[bytes, str]:
+        row = self.conn.execute("SELECT data, mime, thumb, thumb_mime FROM images WHERE id = ?",
+                                (image_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"画像が見つかりません: {image_id}")
+        if thumb and row["thumb"]:
+            return row["thumb"], row["thumb_mime"]
+        return row["data"], row["mime"]
+
+    def cleanup_images(self, older_than_days: int = 2) -> int:
+        """どのカードからも使われていない画像を消す。
+
+        追加・編集の途中で貼った画像を消さないよう、作ってから older_than_days 日以上たったものだけ。
+        """
+        used: set[int] = set()
+        for r in self.conn.execute("SELECT front, back FROM cards"):
+            used.update(cloze.image_ids(r[0]))
+            used.update(cloze.image_ids(r[1]))
+        limit = _iso(self.now() - timedelta(days=older_than_days))
+        rows = self.conn.execute("SELECT id FROM images WHERE created_at < ?", (limit,)).fetchall()
+        stale = [r[0] for r in rows if r[0] not in used]
+        for i in stale:
+            self.conn.execute("DELETE FROM images WHERE id = ?", (i,))
+        self.conn.commit()
+        return len(stale)
 
     def units(self, subject: str = "") -> list[dict]:
         if subject:

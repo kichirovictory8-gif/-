@@ -54,7 +54,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((s, res["added"]), (201, 2))
         s, n = self.call("GET", "/api/session/next")
         self.assertEqual((n["remaining_due"], n["card"]["id"]), (3, card["id"]))
-        self.assertIn("cloze", n["card"]["question_html"])
+        self.assertIn('class="cl"', n["card"]["question_html"])
         s, r = self.call("POST", "/api/review", {"card_id": card["id"], "rating": "again"})
         self.assertEqual((s, r["stage"]), (200, 0))
         s, d = self.call("GET", "/api/dashboard")
@@ -79,6 +79,24 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(s, 200)
         s, e = self.call("GET", f"/api/cards/{card['id']}")
         self.assertEqual(s, 404)
+
+    def test_images_and_render(self):
+        import base64
+        png = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x07" * 30).decode()
+        s, im = self.call("POST", "/api/images", {"data": png, "thumb": png, "width": 10, "height": 5})
+        self.assertEqual(s, 201)
+        with urllib.request.urlopen(f"{self.base}/api/images/{im['id']}/thumb") as r:
+            self.assertEqual(r.headers["Content-Type"], "image/png")
+            self.assertIn("max-age", r.headers["Cache-Control"])
+            self.assertTrue(r.read().startswith(b"\x89PNG"))
+        masks = {str(im["id"]): [{"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}]}
+        s, r = self.call("POST", "/api/render", {"front": f"[[img:{im['id']}]]", "back": "b", "masks": masks})
+        self.assertEqual((s, r["image_ids"]), (200, [im["id"]]))
+        self.assertIn('class="mask"', r["question_html"])
+        s, c = self.call("POST", "/api/cards", {"subject": "化学", "front": f"[[img:{im['id']}]]", "back": "", "masks": masks})
+        self.assertEqual((s, c["thumb_id"]), (201, im["id"]))
+        s, e = self.call("POST", "/api/images", {"data": "data:image/png;base64,PHN2Zz4="})
+        self.assertEqual(s, 400)
 
     def test_csrf_and_host(self):
         s, _ = self.call("POST", "/api/cards", {"subject": "薬理", "front": "a", "back": "b"},

@@ -98,6 +98,29 @@ class ServerTest(unittest.TestCase):
         s, e = self.call("POST", "/api/images", {"data": "data:image/png;base64,PHN2Zz4="})
         self.assertEqual(s, 400)
 
+    def test_tags_and_session_options(self):
+        from urllib.parse import quote
+        s, c1 = self.call("POST", "/api/cards", {"subject": "薬剤", "front": "t1", "back": "b", "tags": "タグA タグB"})
+        s, c2 = self.call("POST", "/api/cards", {"subject": "薬剤", "front": "t2", "back": "b", "tags": ["タグA"]})
+        self.assertEqual(c1["tags"], ["タグA", "タグB"])
+        s, tags = self.call("GET", "/api/tags")
+        self.assertIn({"tag": "タグA", "n": 2}, tags)
+        q = "tags=" + quote("タグA,タグB")
+        s, cnt = self.call("GET", f"/api/session/count?{q}&tag_mode=and")
+        self.assertEqual(cnt["total"], 1)
+        s, n = self.call("GET", f"/api/session/next?{q}&tag_mode=or&order=added_desc")
+        self.assertEqual(n["card"]["id"], c2["id"])
+        s, n = self.call("GET", f"/api/session/next?{q}&session=sess-abcdefgh&order=added")
+        self.assertEqual((n["kind"], n["card"]["id"]), ("practice", c1["id"]))
+        s, r = self.call("POST", "/api/review", {"card_id": c1["id"], "rating": "good", "session": "sess-abcdefgh"})
+        self.assertEqual((s, r["practice"], r["stage"]), (200, True, 0))
+        s, _ = self.call("GET", "/api/session/next?order=bogus")
+        self.assertEqual(s, 400)
+        s, c = self.call("PUT", f"/api/cards/{c1['id']}", {"subject": "薬剤", "front": "t1", "back": "b", "tags": ""})
+        self.assertEqual(c["tags"], [])
+        s, lst = self.call("GET", "/api/cards?tag=" + quote("タグA"))
+        self.assertEqual(lst["total"], 1)
+
     def test_csrf_and_host(self):
         s, _ = self.call("POST", "/api/cards", {"subject": "薬理", "front": "a", "back": "b"},
                          headers={"X-Yakushi-Flash": ""})

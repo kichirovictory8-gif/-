@@ -10,13 +10,15 @@
   "cards": [
     {"id": 1, "subject": "薬理", "unit": "自律神経", "front": "...[[img:3]]", "back": "...",
      "masks": {"3": [{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.1, "hint": ""}]},
+     "tags": ["頻出", "計算"],
      "stage": 2, "due": "2026-11-23", "created_at": "...", "updated_at": "...",
      "reviews": [{"reviewed_at": "...", "review_date": "...", "rating": "good",
                   "stage_before": 0, "stage_after": 1, "is_recheck": false,
-                  "counted": true}]}
+                  "counted": true, "practice_session": null}]}
   ]
 }
 "counted": false は「学習状況のリセット前の評価」（履歴としては残るが集計に数えない）。
+"practice_session" は練習（全カード）での評価（間隔・集計に影響しない）。tags / practice_session は省略可。
 """
 from __future__ import annotations
 
@@ -27,8 +29,9 @@ import sqlite3
 from datetime import date, datetime
 
 from . import APP_ID, cloze, srs
-from .db import MAX_IMAGE_BYTES, MAX_THUMB_BYTES, sniff_mime
+from .db import MAX_IMAGE_BYTES, MAX_THUMB_BYTES, SESSION_RE, sniff_mime
 from .subjects import check_subject
+from .tags import normalize_tags
 
 FORMAT_VERSION = 2
 READABLE_VERSIONS = (1, 2)
@@ -51,7 +54,11 @@ def export_data(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             "stage_after": r["stage_after"],
             "is_recheck": bool(r["is_recheck"]),
             "counted": bool(r["counted"]),
+            "practice_session": r["practice_session"],
         })
+    tags_by_card: dict[int, list[str]] = {}
+    for t in conn.execute("SELECT card_id, tag FROM card_tags ORDER BY card_id, tag"):
+        tags_by_card.setdefault(t["card_id"], []).append(t["tag"])
     images = []
     for im in conn.execute("SELECT * FROM images ORDER BY id"):
         images.append({
@@ -73,6 +80,7 @@ def export_data(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             "front": c["front"],
             "back": c["back"],
             "masks": masks,
+            "tags": tags_by_card.get(c["id"], []),
             "stage": c["stage"],
             "due": c["due"],
             "created_at": c["created_at"],
@@ -105,6 +113,14 @@ def _b64(value, max_bytes: int, what: str) -> bytes:
     if len(raw) > max_bytes:
         raise ValueError(f"{what}が大きすぎます")
     return raw
+
+
+def _session(value, idx: int):
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not SESSION_RE.match(value):
+        raise ValueError(f"{idx + 1}枚目: practice_session が正しくありません")
+    return value
 
 
 def _validate_images(data) -> list[dict]:
@@ -159,12 +175,18 @@ def _validate(data) -> list[dict]:
                 "stage_after": int(rv.get("stage_after", 0)),
                 "is_recheck": 1 if rv.get("is_recheck") else 0,
                 "counted": rv.get("counted", True) is not False,
+                "practice_session": _session(rv.get("practice_session"), i),
             })
         try:
             masks = cloze.normalize_masks(c.get("masks"), front)
         except ValueError as e:
             raise ValueError(f"{i + 1}枚目: {e}") from None
+        try:
+            tags = normalize_tags(c.get("tags") or [])
+        except ValueError as e:
+            raise ValueError(f"{i + 1}枚目: {e}") from None
         out.append({
+            "tags": tags,
             "masks": masks,
             "id": c.get("id") if isinstance(c.get("id"), int) else None,
             "subject": subject,
@@ -227,13 +249,14 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
                  c["created_at"], c["updated_at"]),
             )
             card_id = cur.lastrowid
+            conn.executemany("INSERT INTO card_tags(card_id, tag) VALUES (?, ?)", [(card_id, t) for t in c["tags"]])
             reset_id = 0
             for rv in c["reviews"]:
                 rcur = conn.execute(
-                    "INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after, is_recheck)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after,"
+                    " is_recheck, practice_session) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (card_id, rv["reviewed_at"], rv["review_date"], rv["rating"], rv["stage_before"],
-                     rv["stage_after"], rv["is_recheck"]),
+                     rv["stage_after"], rv["is_recheck"], rv["practice_session"]),
                 )
                 n_reviews += 1
                 if not rv["counted"]:

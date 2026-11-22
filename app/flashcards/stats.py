@@ -6,6 +6,7 @@
     未学習   … 一度も評価していない（リセット後を含む）カード
     定着率   … 間隔 30 日以上（段階 5 以上）のカード ÷ 全カード
     今日の復習数 … 今日の評価の回数（再確認を除く）
+    練習（全カード）での評価は、どの集計にも数えない（履歴には残る）。
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from .subjects import SUBJECTS, check_subject
 def _daily_ratings(conn: sqlite3.Connection, start: date, end: date) -> dict[str, dict[str, int]]:
     rows = conn.execute(
         "SELECT review_date, rating, COUNT(*) AS n FROM reviews"
-        " WHERE is_recheck = 0 AND review_date BETWEEN ? AND ? GROUP BY review_date, rating",
+        " WHERE is_recheck = 0 AND practice_session IS NULL AND review_date BETWEEN ? AND ?"
+        " GROUP BY review_date, rating",
         (start.isoformat(), end.isoformat()),
     ).fetchall()
     out: dict[str, dict[str, int]] = {}
@@ -31,7 +33,8 @@ def _daily_ratings(conn: sqlite3.Connection, start: date, end: date) -> dict[str
 
 def streak(conn: sqlite3.Connection, today: date) -> int:
     """連続学習日数。今日まだ学習していなければ昨日までの連続日数を返す。"""
-    days = {r[0] for r in conn.execute("SELECT DISTINCT review_date FROM reviews WHERE is_recheck = 0")}
+    days = {r[0] for r in conn.execute(
+        "SELECT DISTINCT review_date FROM reviews WHERE is_recheck = 0 AND practice_session IS NULL")}
     d = today if today.isoformat() in days else today - timedelta(days=1)
     n = 0
     while d.isoformat() in days:
@@ -46,7 +49,7 @@ def dashboard(conn: sqlite3.Connection, today: date, recent_days: int = 14, fore
     overdue = conn.execute("SELECT COUNT(*) FROM cards WHERE due < ?", (t,)).fetchone()[0]
     total = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
     reviewed_today = conn.execute(
-        "SELECT COUNT(*) FROM reviews WHERE is_recheck = 0 AND review_date = ?", (t,)
+        "SELECT COUNT(*) FROM reviews WHERE is_recheck = 0 AND practice_session IS NULL AND review_date = ?", (t,)
     ).fetchone()[0]
 
     stage_rows = dict(conn.execute("SELECT stage, COUNT(*) FROM cards GROUP BY stage").fetchall())
@@ -158,7 +161,8 @@ def weak(conn: sqlite3.Connection, today: date, days: int = 14, min_again: int =
     end = today.isoformat()
     base = (
         "FROM reviews r JOIN cards c ON c.id = r.card_id"
-        " WHERE r.is_recheck = 0 AND r.id > c.reset_review_id AND r.review_date BETWEEN ? AND ?"
+        " WHERE r.is_recheck = 0 AND r.practice_session IS NULL AND r.id > c.reset_review_id"
+        " AND r.review_date BETWEEN ? AND ?"
     )
     cards = conn.execute(
         "SELECT c.id, c.subject, c.unit, c.front, c.back, c.stage, c.due,"

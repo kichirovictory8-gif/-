@@ -224,6 +224,7 @@ function cardForm(el, init = {}) {
   el.innerHTML = `
     <div class="field-head"><b>表面</b><span class="muted">穴埋め {{c1::語句}} / {{c1::語句::ヒント}}</span><span class="spacer"></span>
       <button type="button" class="btn small" data-a="cloze">選んだ語句を穴埋め <kbd>Alt</kbd>+<kbd>C</kbd></button>
+      <button type="button" class="btn small" data-a="uncloze" title="カーソルを穴埋めの中に置くか、範囲を選んで押す">穴埋めを解除 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></button>
       <button type="button" class="btn small" data-a="img" data-side="front">画像を追加</button></div>
     <textarea class="cf-front" rows="4" placeholder="例：β1受容体を刺激すると心拍数は{{c1::増加::増減}}する"></textarea>
     <div class="sub cf-cap">プレビュー<span class="cf-imgnote" hidden>　—　<b>画像をクリック（タップ）すると、画像の上に穴を作れます</b></span></div>
@@ -304,8 +305,14 @@ function cardForm(el, init = {}) {
   const clozeBtn = el.querySelector("[data-a=cloze]");
   clozeBtn.addEventListener("mousedown", e => e.preventDefault());   // 選択を保ったまま
   clozeBtn.addEventListener("click", () => { $f.focus(); wrapCloze($f); });
+  const unBtn = el.querySelector("[data-a=uncloze]");
+  unBtn.addEventListener("mousedown", e => e.preventDefault());
+  unBtn.addEventListener("click", () => unwrapCloze($f));
   el.addEventListener("keydown", e => {
-    if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") { e.preventDefault(); wrapCloze(e.target); }
+    if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") {
+      e.preventDefault();
+      if (e.shiftKey) unwrapCloze(e.target); else wrapCloze(e.target);
+    }
   });
   preview();
   return {
@@ -313,6 +320,50 @@ function cardForm(el, init = {}) {
     reset() { $f.value = ""; $b.value = ""; masks = {}; preview(); },
     focus() { $f.focus(); },
   };
+}
+
+/* カーソル位置（または選んだ範囲）にある {{c1::語句::ヒント}} を「語句」に戻す（Alt+Shift+C） */
+function unwrapCloze(ta) {
+  const v = ta.value, a = ta.selectionStart, b = ta.selectionEnd;
+  const re = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+  const hits = [...v.matchAll(re)].filter(m => m.index <= b && m.index + m[0].length >= a &&
+    (a !== b || (a > m.index && a < m.index + m[0].length)));
+  if (!hits.length) { toast("戻したい穴埋め {{c1::…}} の中にカーソルを置くか、範囲を選んでから押してください", true); return; }
+  const start = hits[0].index, last = hits[hits.length - 1], end = last.index + last[0].length;
+  let seg = "", pos = start;
+  for (const m of hits) { seg += v.slice(pos, m.index) + m[2]; pos = m.index + m[0].length; }
+  seg += v.slice(pos, end);
+  ta.focus();
+  ta.setRangeText(seg, start, end, "select");
+  ta.dispatchEvent(new Event("input"));
+  toast(hits.length > 1 ? `${hits.length}か所の穴埋めを元の文章に戻しました` : "穴埋めを元の文章に戻しました");
+}
+
+/* ---------- タグの入力（追加・一括追加・編集で共通） ---------- */
+function splitTags(text) {
+  const out = [];
+  for (let t of String(text || "").split(/[\s,、，]+/)) { t = t.replace(/^[#＃]+/, "").trim(); if (t && !out.includes(t)) out.push(t); }
+  return out;
+}
+/* input: タグの入力欄、box: 今あるタグのボタンを並べる場所 */
+async function tagPicker(input, box) {
+  let all = [];
+  try { all = await api("GET", "tags"); } catch { /* なくても入力はできる */ }
+  function render() {
+    const cur = splitTags(input.value);
+    const names = [...new Set([...all.map(t => t.tag), ...cur])].slice(0, 40);
+    box.innerHTML = names.length ? `<span class="sub">今あるタグ：</span>` + names.map(t =>
+      `<button type="button" class="chip ${cur.includes(t) ? "on" : ""}" data-t="${esc(t)}">${esc(t)}</button>`).join("") : "";
+    box.querySelectorAll("[data-t]").forEach(b => b.addEventListener("click", () => {
+      const now = splitTags(input.value), t = b.dataset.t;
+      input.value = (now.includes(t) ? now.filter(x => x !== t) : [...now, t]).join(" ");
+      input.dispatchEvent(new Event("change"));
+      render();
+    }));
+  }
+  input.addEventListener("input", render);
+  render();
+  return { refresh: async () => { try { all = await api("GET", "tags"); } catch { } render(); } };
 }
 
 /* ---------- ルーター ---------- */
@@ -421,13 +472,113 @@ function forecastChart(el, rows, today) {
   attachTip(el.querySelector(".chart"));
 }
 
-/* ---------- 学習 ---------- */
+/* ---------- 学習：開始前の設定 ---------- */
+const ORDER_OPTS = [["due", "期日が古い順"], ["random", "ランダム"], ["added", "追加した順（古い→新しい）"], ["added_desc", "追加した順（新しい→古い）"]];
+function newSessionId() {
+  return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
 async function pageStudy(params) {
+  if (params.get("run")) return runStudy(params);
+  const saved = store.get("study", {});
+  const st = {
+    scope: saved.scope === "practice" ? "practice" : "due",
+    subject: params.has("subject") ? params.get("subject") : (saved.subject || ""),
+    tags: params.has("tags") ? splitTags(params.get("tags").replace(/,/g, " ")) : (saved.tags || []),
+    tag_mode: saved.tag_mode === "and" ? "and" : "or",
+    order: ORDER_OPTS.some(([v]) => v === saved.order) ? saved.order : "due",
+  };
+  const allTags = await api("GET", "tags").catch(() => []);
+  st.tags = st.tags.filter(t => allTags.some(x => x.tag === t));
+  if (st.subject && !META.subjects.includes(st.subject)) st.subject = "";
+  const seg = (name, cur, list) => `<div class="seg" data-name="${name}">${list.map(([v, l]) =>
+    `<button type="button" data-v="${esc(v)}" class="${v === cur ? "on" : ""}">${esc(l)}</button>`).join("")}</div>`;
+  $main.append(h(`<div class="study-wrap">
+    <h1>学習を始める</h1>
+    <div class="panel setup">
+      <div class="setup-row"><div class="setup-lab">対象</div><div>
+        ${seg("scope", st.scope, [["due", "期日のカード（いつもの復習）"], ["practice", "全カードで練習"]])}
+        <p class="sub" id="scopeNote"></p></div></div>
+      <div class="setup-row"><div class="setup-lab">科目</div><div><select id="subject">${subjectOptions(st.subject, "全科目")}</select></div></div>
+      <div class="setup-row"><div class="setup-lab">タグ</div><div>
+        ${allTags.length ? `<div class="chips" id="tags">${allTags.map(t =>
+          `<button type="button" class="chip ${st.tags.includes(t.tag) ? "on" : ""}" data-t="${esc(t.tag)}">${esc(t.tag)} <span class="muted">${t.n}</span></button>`).join("")}</div>
+          <div class="row" style="margin-top:8px"><span class="sub">複数選んだとき：</span>${seg("tag_mode", st.tag_mode, [["or", "どれか1つを含む"], ["and", "全部を含む"]])}
+          <button type="button" class="btn small" id="clearTags">タグの選択を外す</button></div>`
+          : `<span class="muted">タグの付いたカードはまだありません（追加・編集画面で付けられます）</span>`}
+      </div></div>
+      <div class="setup-row"><div class="setup-lab">順番</div><div><div class="chips" data-name="order">${ORDER_OPTS.map(([v, l]) =>
+        `<button type="button" class="chip ${v === st.order ? "on" : ""}" data-v="${v}">${esc(l)}</button>`).join("")}</div>
+        <p class="sub">どの順番でも、✖ にしたカードは最後に1回だけ再確認として出ます。</p></div></div>
+      <div class="row setup-start"><span id="count" class="sub"></span><span class="spacer"></span>
+        <button class="btn primary big" id="start">始める <kbd>Enter</kbd></button></div>
+    </div></div>`));
+  const $count = $main.querySelector("#count"), $start = $main.querySelector("#start");
+  let counts = { due: 0, total: 0 }, seq = 0;
+  async function refresh() {
+    store.set("study", st);
+    $main.querySelector("#scopeNote").textContent = st.scope === "due"
+      ? "今日が期日のカードを出します。○△✖ で次の期日が決まります。"
+      : "条件に合うカードを期日に関係なく全部出します。評価は履歴に残りますが、間隔や集計（今日の復習数・苦手リストなど）は変わりません。";
+    const qs = new URLSearchParams({ subject: st.subject, tags: st.tags.join(","), tag_mode: st.tag_mode });
+    const my = ++seq;
+    try { counts = await api("GET", "session/count?" + qs); } catch (e) { fail(e); return; }
+    if (my !== seq) return;
+    const n = st.scope === "due" ? counts.due : counts.total;
+    $count.innerHTML = st.scope === "due"
+      ? `この条件の期日のカード：<b>${counts.due}</b>枚（条件に合うカードは全部で ${counts.total}枚）`
+      : `この条件のカード：<b>${counts.total}</b>枚（うち今日が期日 ${counts.due}枚）`;
+    $start.disabled = !n;
+  }
+  $main.querySelectorAll("[data-name]").forEach(g => g.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+    st[g.dataset.name] = b.dataset.v;
+    g.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    refresh();
+  })));
+  $main.querySelector("#subject").addEventListener("change", e => { st.subject = e.target.value; refresh(); });
+  $main.querySelectorAll("#tags [data-t]").forEach(b => b.addEventListener("click", () => {
+    const t = b.dataset.t;
+    st.tags = st.tags.includes(t) ? st.tags.filter(x => x !== t) : [...st.tags, t];
+    b.classList.toggle("on", st.tags.includes(t));
+    refresh();
+  }));
+  $main.querySelector("#clearTags")?.addEventListener("click", () => {
+    st.tags = []; $main.querySelectorAll("#tags .chip").forEach(x => x.classList.remove("on")); refresh();
+  });
+  function start() {
+    if ($start.disabled) return;
+    const p = { run: 1, scope: st.scope, order: st.order };
+    if (st.subject) p.subject = st.subject;
+    if (st.tags.length) { p.tags = st.tags.join(","); p.tag_mode = st.tag_mode; }
+    if (st.scope === "practice") p.session = newSessionId();
+    go("study", p);
+  }
+  $start.addEventListener("click", start);
+  keyHandler = e => { if (e.key === "Enter" && !isTyping(e)) { e.preventDefault(); start(); } };
+  await refresh();
+}
+
+function studySummary(params) {
+  const parts = [];
+  parts.push(params.get("session") ? "全カードで練習" : "期日のカード");
+  if (params.get("subject")) parts.push(params.get("subject"));
+  const tags = (params.get("tags") || "").split(",").filter(Boolean);
+  if (tags.length) parts.push("タグ：" + tags.join(params.get("tag_mode") === "and" ? " かつ " : " または "));
+  parts.push((ORDER_OPTS.find(([v]) => v === (params.get("order") || "due")) || ORDER_OPTS[0])[1]);
+  return parts;
+}
+
+/* ---------- 学習：実行中 ---------- */
+async function runStudy(params) {
   const subject = params.get("subject") || "";
+  const session = params.get("session") || "";
+  const query = new URLSearchParams({ subject, tags: params.get("tags") || "", tag_mode: params.get("tag_mode") || "or",
+    order: params.get("order") || "due" });
+  if (session) query.set("session", session);
   const wrap = h(`<div class="study-wrap">
     <div class="study-head">
-      <h1 style="margin:0">学習</h1>
-      <select id="subj" aria-label="科目">${subjectOptions(subject, "全科目")}</select>
+      <h1 style="margin:0">${session ? "練習" : "学習"}</h1>
+      <span class="chips">${studySummary(params).map(t => `<span class="tag">${esc(t)}</span>`).join("")}</span>
+      <a class="btn small" href="#/study">条件を変える</a>
       <span class="spacer"></span><span class="sub" id="counts"></span>
     </div>
     <div class="progress"><i id="prog" style="width:0"></i></div>
@@ -435,13 +586,12 @@ async function pageStudy(params) {
     <div class="hint-keys keys-only"><kbd>Space</kbd> 次の穴を開ける／答えを表示　<kbd>Enter</kbd> 全部表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
   </div>`);
   $main.append(wrap);
-  wrap.querySelector("#subj").addEventListener("change", e => go("study", e.target.value ? { subject: e.target.value } : null));
 
   let current = null, revealed = false, busy = false, doneCount = 0, startTotal = null;
   const stageEl = wrap.querySelector("#stage");
 
   async function load() {
-    const n = await api("GET", "session/next" + (subject ? "?subject=" + encodeURIComponent(subject) : ""));
+    const n = await api("GET", "session/next?" + query);
     const remaining = n.remaining_due + n.remaining_recheck;
     if (startTotal === null) startTotal = remaining;
     startTotal = Math.max(startTotal, doneCount + remaining);
@@ -455,6 +605,7 @@ async function pageStudy(params) {
   }
 
   function nextWhen(r) {
+    if (session) return "練習（間隔は変わりません）";
     if (current.kind === "recheck") return "間隔は変わりません";
     const s = current.stage, iv = META.intervals;
     if (r === "good") { const ns = Math.min(s + 1, iv.length); return `${iv[ns - 1]}日後`; }
@@ -466,18 +617,23 @@ async function pageStudy(params) {
     stageEl.innerHTML = "";
     if (!current) {
       stageEl.append(h(`<div class="flash"><div class="done">
-        <div class="big">🎉</div><h2>${subject ? esc(subject) + "の" : ""}今日の分は終わりました</h2>
-        <p class="sub">このセッションで ${doneCount}回 評価しました。</p>
-        <div class="row" style="justify-content:center"><a class="btn" href="#/today">今日の画面へ</a><a class="btn" href="#/add">カードを追加</a>
-        ${subject ? `<a class="btn" href="#/study">全科目で続ける</a>` : ""}</div></div></div>`));
+        <div class="big">🎉</div><h2>${session ? "練習が終わりました" : "この条件の今日の分は終わりました"}</h2>
+        <p class="sub">${esc(studySummary(params).join("・"))}　—　このセッションで ${doneCount}回 評価しました。</p>
+        <div class="row" style="justify-content:center"><a class="btn" href="#/today">今日の画面へ</a>
+        ${session ? `<button class="btn primary" id="again">同じ条件でもう一度練習</button>` : ""}
+        <a class="btn" href="#/study">条件を変えて続ける</a></div></div></div>`));
+      stageEl.querySelector("#again")?.addEventListener("click", () => {
+        const p = Object.fromEntries(params.entries()); p.session = newSessionId(); go("study", p);
+      });
       return;
     }
     const c = current;
     stageEl.append(h(`<div>
       <div class="flash ${revealed ? "revealed" : ""}">
         <div class="meta"><span class="tag accent">${esc(c.subject)}</span>${c.unit ? `<span>${esc(c.unit)}</span>` : ""}
+          ${c.tags.map(t => `<span class="tag">${esc(t)}</span>`).join("")}
           <span class="spacer"></span><span class="sub" id="holes"></span>
-          ${c.kind === "recheck" ? `<span class="tag warn">再確認</span>` : `<span class="tag">${intervalLabel(c.stage)}</span>`}
+          ${c.kind === "recheck" ? `<span class="tag warn">再確認</span>` : session ? `<span class="tag accent">練習</span>` : `<span class="tag">${intervalLabel(c.stage)}</span>`}
           <span class="muted">周回 ${c.reps}</span></div>
         <div class="q">${c.question_html}</div>
         <div class="a">${revealed ? c.back_html : ""}</div>
@@ -526,7 +682,7 @@ async function pageStudy(params) {
     if (!current || !revealed || busy) return;
     busy = true;
     try {
-      await api("POST", "review", { card_id: current.id, rating: r });
+      await api("POST", "review", session ? { card_id: current.id, rating: r, session } : { card_id: current.id, rating: r });
       doneCount++;
       await load();
     } catch (e) { fail(e); } finally { busy = false; }
@@ -561,10 +717,15 @@ async function pageAdd(params) {
     <div class="panel"><div class="form-grid" style="margin-bottom:12px">
       <label class="field">科目<select id="subject">${subjectOptions(subject)}</select></label>
       <label class="field">系統・単元（任意）<input type="text" id="unit" list="units" value="${esc(unit)}" placeholder="例：自律神経系"><datalist id="units"></datalist></label>
+      <label class="field" style="grid-column:1/-1">タグ（任意・スペース区切りで複数）<input type="text" id="tags" value="${esc(store.get("addTags", ""))}" placeholder="例：頻出 計算 第110回"></label>
+      <div class="chips" id="tagchips" style="grid-column:1/-1"></div>
     </div><div id="body"></div></div>
   </div>`));
   $main.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => go("add", b.dataset.m === "bulk" ? { mode: "bulk" } : null)));
-  const $s = $main.querySelector("#subject"), $u = $main.querySelector("#unit");
+  const $s = $main.querySelector("#subject"), $u = $main.querySelector("#unit"), $t = $main.querySelector("#tags");
+  $t.addEventListener("change", () => store.set("addTags", $t.value.trim()));
+  $t.addEventListener("input", () => store.set("addTags", $t.value.trim()));
+  const picker = await tagPicker($t, $main.querySelector("#tagchips"));
   async function loadUnits() {
     const list = await api("GET", "units?subject=" + encodeURIComponent($s.value)).catch(() => []);
     $main.querySelector("#units").innerHTML = list.filter(x => x.unit).map(x => `<option value="${esc(x.unit)}">`).join("");
@@ -573,10 +734,10 @@ async function pageAdd(params) {
   $u.addEventListener("change", () => store.set("unit:" + $s.value, $u.value.trim()));
   loadUnits();
   const body = $main.querySelector("#body");
-  if (mode === "single") addSingle(body, $s, $u); else addBulk(body, $s, $u);
+  if (mode === "single") addSingle(body, $s, $u, $t, picker); else addBulk(body, $s, $u, $t, picker);
 }
 
-function addSingle(body, $s, $u) {
+function addSingle(body, $s, $u, $t, picker) {
   body.append(h(`<div>
     <div class="cf"></div>
     <div class="row" style="margin-top:12px"><button class="btn primary" id="save">追加する <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
@@ -591,7 +752,8 @@ function addSingle(body, $s, $u) {
     saving = true;
     try {
       store.set("unit:" + $s.value, $u.value.trim());
-      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, ...form.get() });
+      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, tags: $t.value, ...form.get() });
+      picker.refresh();
       added.unshift(c);
       form.reset(); form.focus();
       toast(`追加しました（${c.subject}${c.unit ? "／" + c.unit : ""}）`);
@@ -619,13 +781,13 @@ function thumbTag(c) {
   return c.thumb_id ? `<img class="thumb" src="/api/images/${c.thumb_id}/thumb" alt="" loading="lazy">` : "";
 }
 
-function addBulk(body, $s, $u) {
+function addBulk(body, $s, $u, $tags, picker) {
   body.append(h(`<div>
     <label class="field"><span>1行に1枚：<b>表面[Tab]裏面</b>　<span class="muted">Excel の2列をコピーして貼り付けると Tab 区切りになります。穴埋めだけの行は Tab なしでも可。空行は無視します</span></span>
       <textarea id="text" rows="12" placeholder="アトロピン&#9;ムスカリン受容体遮断&#10;{{c1::ピロカルピン}}は緑内障に使う"></textarea></label>
     <div id="pv" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px"><button class="btn primary" id="add" disabled>追加する</button>
-      <span class="sub">すべて上の科目・系統で、今日が期日の新規カードとして追加されます。</span></div>
+      <span class="sub">すべて上の科目・系統・タグで、今日が期日の新規カードとして追加されます。</span></div>
   </div>`));
   const $t = body.querySelector("#text"), $pv = body.querySelector("#pv"), $add = body.querySelector("#add");
   $t.addEventListener("keydown", e => {   // テキスト欄で Tab を入力できるようにする
@@ -651,7 +813,8 @@ function addBulk(body, $s, $u) {
     $add.disabled = true;
     try {
       store.set("unit:" + $s.value, $u.value.trim());
-      const r = await api("POST", "cards/bulk", { subject: $s.value, unit: $u.value, text: $t.value });
+      const r = await api("POST", "cards/bulk", { subject: $s.value, unit: $u.value, tags: $tags.value, text: $t.value });
+      picker.refresh();
       toast(`${r.added}枚を追加しました（${$s.value}${$u.value.trim() ? "／" + $u.value.trim() : ""}）`);
       $t.value = ""; $pv.innerHTML = ""; $add.textContent = "追加する";
     } catch (e) { fail(e); $add.disabled = false; }
@@ -664,7 +827,9 @@ async function pageCards(params) {
   const f = {
     q: params.get("q") || "", subject: params.get("subject") || "", level: params.get("level") || "",
     due: params.get("due") || "", sort: params.get("sort") || "due", unit: params.has("unit") ? params.get("unit") : null,
+    tag: params.get("tag") || "",
   };
+  const allTags = await api("GET", "tags").catch(() => []);
   let offset = +(params.get("offset") || 0);
   const LIMIT = 50;
   $main.append(h(`<div>
@@ -675,6 +840,7 @@ async function pageCards(params) {
         <select id="subject">${subjectOptions(f.subject, "科目：すべて")}</select>
         <select id="level">${options(LEVELS, f.level)}</select>
         <select id="due">${options(DUES, f.due)}</select>
+        <select id="tag"></select>
         <select id="sort">${options(SORTS, f.sort)}</select>
       </div>
       ${f.unit !== null ? `<div class="row" style="margin-bottom:10px"><span class="tag accent">系統：${esc(f.unit || "（未設定）")}</span><button class="btn small" id="clearUnit">系統の絞り込みを外す</button></div>` : ""}
@@ -684,33 +850,40 @@ async function pageCards(params) {
     </div></div>`));
   const update = () => {
     const p = {};
-    for (const k of ["q", "subject", "level", "due"]) if (f[k]) p[k] = f[k];
+    for (const k of ["q", "subject", "level", "due", "tag"]) if (f[k]) p[k] = f[k];
     if (f.sort !== "due") p.sort = f.sort;
     if (f.unit !== null) p.unit = f.unit;
     if (offset) p.offset = offset;
     history.replaceState(null, "", "#/cards" + (Object.keys(p).length ? "?" + new URLSearchParams(p) : ""));
     load();
   };
+  const tagOptions = tags => options([["", "タグ：すべて"], ...tags.map(t => [t.tag, `${t.tag}（${t.n}）`]),
+    ...(f.tag && !tags.some(t => t.tag === f.tag) ? [[f.tag, `${f.tag}（0）`]] : [])], f.tag);
+  $main.querySelector("#tag").innerHTML = tagOptions(allTags);
+  async function refreshTags() {   // 編集でタグが増減したとき
+    const tags = await api("GET", "tags").catch(() => null);
+    if (tags) $main.querySelector("#tag").innerHTML = tagOptions(tags);
+  }
   let qTimer = null;
   $main.querySelector("#q").addEventListener("input", e => { clearTimeout(qTimer); qTimer = setTimeout(() => { f.q = e.target.value.trim(); offset = 0; update(); }, 250); });
-  for (const k of ["subject", "level", "due", "sort"]) {
+  for (const k of ["subject", "level", "due", "sort", "tag"]) {
     $main.querySelector("#" + k).addEventListener("change", e => { f[k] = e.target.value; offset = 0; if (k === "subject") f.unit = null; update(); });
   }
-  $main.querySelector("#clearUnit")?.addEventListener("click", () => { f.unit = null; offset = 0; go("cards", Object.fromEntries(Object.entries({ q: f.q, subject: f.subject, level: f.level, due: f.due }).filter(([, v]) => v))); });
+  $main.querySelector("#clearUnit")?.addEventListener("click", () => { f.unit = null; offset = 0; go("cards", Object.fromEntries(Object.entries({ q: f.q, subject: f.subject, level: f.level, due: f.due, tag: f.tag }).filter(([, v]) => v))); });
 
   async function load() {
     const qs = new URLSearchParams({ limit: LIMIT, offset });
-    for (const k of ["q", "subject", "level", "due", "sort"]) if (f[k]) qs.set(k, f[k]);
+    for (const k of ["q", "subject", "level", "due", "sort", "tag"]) if (f[k]) qs.set(k, f[k]);
     if (f.unit !== null) qs.set("unit", f.unit);
     const res = await api("GET", "cards?" + qs);
     $main.querySelector("#total").textContent = `${res.total}枚`;
     const tb = $main.querySelector("#rows");
     tb.innerHTML = res.items.length ? res.items.map(c => `<tr class="clickable" data-id="${c.id}">
-      <td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell" title="${esc(c.front_plain)}">${esc(c.front_plain)}</td>
+      <td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td><td class="front-cell" title="${esc(c.front_plain)}">${esc(c.front_plain)}${c.tags.length ? `<div class="tagline">${c.tags.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}</td>
       <td>${intervalLabel(c.stage)}</td><td>${fmtDate(c.due)} <span class="sub">${relDue(c.due)}</span></td>
       <td class="num">${c.reps}</td><td>${ratingChip(c.last_rating)}</td></tr>`).join("")
       : `<tr><td colspan="8" class="empty">該当するカードはありません</td></tr>`;
-    tb.querySelectorAll("tr[data-id]").forEach(tr => tr.addEventListener("click", () => openEditor(+tr.dataset.id, () => load())));
+    tb.querySelectorAll("tr[data-id]").forEach(tr => tr.addEventListener("click", () => openEditor(+tr.dataset.id, () => { refreshTags(); load(); })));
     const pg = $main.querySelector("#pager");
     const pages = Math.max(1, Math.ceil(res.total / LIMIT)), cur = Math.floor(offset / LIMIT) + 1;
     pg.innerHTML = res.total > LIMIT ? `<button class="btn small" id="prev" ${cur <= 1 ? "disabled" : ""}>前へ</button>
@@ -734,7 +907,9 @@ async function openEditor(id, onChange) {
     <div class="mb">
       <div class="form-grid" style="margin-bottom:12px">
         <label class="field">科目<select name="subject">${subjectOptions(c.subject)}</select></label>
-        <label class="field">系統・単元<input type="text" name="unit" value="${esc(c.unit)}"></label></div>
+        <label class="field">系統・単元<input type="text" name="unit" value="${esc(c.unit)}"></label>
+        <label class="field" style="grid-column:1/-1">タグ（スペース区切りで複数）<input type="text" name="tags" value="${esc(c.tags.join(" "))}" placeholder="例：頻出 計算"></label>
+        <div class="chips etags" style="grid-column:1/-1"></div></div>
       <div class="cf"></div>
       <h2 style="margin-top:18px">評価の履歴（${hist.length}件）</h2>
       ${hist.length ? `<div class="table-wrap" style="max-height:200px"><table><thead><tr><th>学習日</th><th>日時</th><th>評価</th><th>間隔</th><th></th></tr></thead><tbody>
@@ -749,10 +924,11 @@ async function openEditor(id, onChange) {
       <button class="btn danger" type="button" id="edel">削除</button></div></form>`;
   const form = dlg.querySelector("#ef");
   const cf = cardForm(dlg.querySelector(".cf"), c);
+  tagPicker(form.tags, dlg.querySelector(".etags"));
   const close = () => dlg.close();
   async function save() {
     try {
-      await api("PUT", "cards/" + id, { subject: form.subject.value, unit: form.unit.value, ...cf.get() });
+      await api("PUT", "cards/" + id, { subject: form.subject.value, unit: form.unit.value, tags: form.tags.value, ...cf.get() });
       toast("保存しました"); close(); onChange && onChange("saved");
     } catch (e) { fail(e); }
   }

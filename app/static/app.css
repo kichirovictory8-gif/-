@@ -313,3 +313,18 @@ textarea.drop { outline: 2px dashed var(--accent); outline-offset: 2px; backgrou
 @media (pointer: coarse) {
   .me-handle { width: 28px; height: 28px; right: -14px; bottom: -14px; }
 }
+
+/* ---- タグ・学習の設定 ---- */
+.chips { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 3px 12px; cursor: pointer; font-size: 13px; }
+.chip:hover { background: var(--surface-2); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.chip.on .muted { color: var(--accent-ink); opacity: .8; }
+.tagline { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; white-space: normal; }
+.tagline .tag { font-size: 11px; padding: 0 6px; }
+.setup-row { display: grid; grid-template-columns: 72px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); align-items: start; }
+.setup-lab { font-weight: 700; padding-top: 6px; }
+.setup .seg { flex-wrap: wrap; }
+.setup-start { padding-top: 16px; }
+@media (max-width: 640px) { .setup-row { grid-template-columns: 1fr; gap: 6px; } }
+@media (pointer: coarse) { .chip { padding: 7px 14px; font-size: 14px; } }

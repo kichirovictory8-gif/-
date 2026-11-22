@@ -224,12 +224,21 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("GET", "dashboard"):
             return self._json(stats.dashboard(conn, st.today()))
 
-        if parts[0] == "session" and method == "GET" and parts[1:] == ["next"]:
-            return self._json(st.next_card(q.get("subject", "")))
+        if parts[0] == "session" and method == "GET" and parts[1:] in (["next"], ["count"]):
+            filt = {"subject": q.get("subject", ""), "tags": q.get("tags", ""),
+                    "tag_mode": q.get("tag_mode", "or") or "or"}
+            if parts[1] == "count":
+                return self._json(st.session_counts(**filt))
+            return self._json(st.next_card(**filt, order=q.get("order", "due") or "due",
+                                           session=q.get("session") or None))
 
         if route == ("POST", "review"):
-            result = st.record_review(_int(body.get("card_id")), str(body.get("rating", "")))
+            result = st.record_review(_int(body.get("card_id")), str(body.get("rating", "")),
+                                      session=body.get("session") or None)
             return self._json(result)
+
+        if route == ("GET", "tags"):
+            return self._json(st.all_tags())
 
         if parts[0] == "cards":
             return self._cards(method, parts[1:], q, body)
@@ -322,12 +331,13 @@ class Handler(BaseHTTPRequestHandler):
                 unit = q.get("unit")
                 return self._json(st.list_cards(
                     q=q.get("q", "").strip(), subject=q.get("subject", ""),
-                    unit=unit if "unit" in q else None, level=q.get("level", ""),
+                    unit=unit if "unit" in q else None, level=q.get("level", ""), tag=q.get("tag", ""),
                     due=q.get("due", ""), sort=q.get("sort", "due"), limit=limit, offset=offset,
                 ))
             if method == "POST":
                 card_id = st.add_card(body.get("subject", ""), body.get("unit", ""),
-                                      body.get("front", ""), body.get("back", ""), body.get("masks"))
+                                      body.get("front", ""), body.get("back", ""), body.get("masks"),
+                                      body.get("tags"))
                 return self._json(st.get_card(card_id), 201)
         if rest == ["bulk"] and method == "POST":
             parsed = parse_bulk(str(body.get("text", "")))
@@ -344,7 +354,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, f"{len(parsed.errors)}行に問題があります。直してから追加してください")
             if not parsed.cards:
                 raise ApiError(400, "追加するカードがありません")
-            ids = st.add_many(body.get("subject", ""), body.get("unit", ""), parsed.cards)
+            ids = st.add_many(body.get("subject", ""), body.get("unit", ""), parsed.cards, body.get("tags"))
             return self._json({**preview, "added": len(ids)}, 201)
         card_id = _int(rest[0])
         if len(rest) == 1:
@@ -352,7 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(st.get_card(card_id))
             if method == "PUT":
                 st.update_card(card_id, body.get("subject", ""), body.get("unit", ""),
-                               body.get("front", ""), body.get("back", ""), body.get("masks"))
+                               body.get("front", ""), body.get("back", ""), body.get("masks"),
+                               body.get("tags"))
                 return self._json(st.get_card(card_id))
             if method == "DELETE":
                 st.delete_card(card_id)

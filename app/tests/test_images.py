@@ -70,7 +70,7 @@ class ImageStoreTest(unittest.TestCase):
 
 
 class MigrationTest(unittest.TestCase):
-    def test_v1_file_gets_masks_column(self):
+    def test_old_file_is_migrated(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "old.db"
             old = sqlite3.connect(path)
@@ -81,14 +81,22 @@ class MigrationTest(unittest.TestCase):
                   reset_review_id INTEGER NOT NULL DEFAULT 0);
                 INSERT INTO cards(subject, front, back, due, created_at, updated_at)
                   VALUES ('薬理', '古いカード', '裏', '2026-11-20', '2026-11-20T10:00:00', '2026-11-20T10:00:00');
+                CREATE TABLE reviews (id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL, reviewed_at TEXT NOT NULL,
+                  review_date TEXT NOT NULL, rating TEXT NOT NULL, stage_before INTEGER NOT NULL,
+                  stage_after INTEGER NOT NULL, is_recheck INTEGER NOT NULL DEFAULT 0);
+                INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after)
+                  VALUES (1, '2026-11-19T10:00:00', '2026-11-19', 'good', 0, 1);
             """)
             old.commit()
             old.close()
             conn = db.connect(path)
             try:
                 c = db.Store(conn).get_card(1)
-                self.assertEqual((c["front"], c["masks"]), ("古いカード", {}))
-                self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "2")
+                self.assertEqual((c["front"], c["masks"], c["tags"], c["reps"]), ("古いカード", {}, [], 1))
+                self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+                                 str(db.SCHEMA_VERSION))
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(reviews)")}
+                self.assertIn("practice_session", cols)
             finally:
                 conn.close()
 

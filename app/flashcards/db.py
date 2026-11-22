@@ -4,14 +4,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import cloze, srs
 from .subjects import SUBJECTS, check_subject
+from .tags import normalize_tags
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -40,10 +42,17 @@ CREATE TABLE IF NOT EXISTS reviews (
     rating       TEXT    NOT NULL CHECK (rating IN ('good', 'fair', 'again')),
     stage_before INTEGER NOT NULL,
     stage_after  INTEGER NOT NULL,
-    is_recheck   INTEGER NOT NULL DEFAULT 0       -- 1 = その日の再確認（間隔に影響しない）
+    is_recheck   INTEGER NOT NULL DEFAULT 0,      -- 1 = その日の再確認（間隔に影響しない）
+    practice_session TEXT                         -- 練習（全カード）での評価なら練習の id。間隔・集計に影響しない
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, id);
 CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(review_date);
+CREATE TABLE IF NOT EXISTS card_tags (
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    tag     TEXT    NOT NULL,
+    PRIMARY KEY (card_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_card_tags_tag ON card_tags(tag);
 CREATE TABLE IF NOT EXISTS images (
     id         INTEGER PRIMARY KEY,
     sha256     TEXT    NOT NULL UNIQUE,
@@ -95,7 +104,7 @@ def decode_data_url(value: str, max_bytes: int) -> tuple[bytes, str]:
 COUNTED_CTE = """
 counted AS (
     SELECT r.* FROM reviews r JOIN cards c ON c.id = r.card_id
-    WHERE r.is_recheck = 0 AND r.id > c.reset_review_id
+    WHERE r.is_recheck = 0 AND r.practice_session IS NULL AND r.id > c.reset_review_id
 ),
 last_rating AS (
     SELECT card_id, rating FROM counted
@@ -105,6 +114,43 @@ reps AS (
     SELECT card_id, COUNT(*) AS n FROM counted GROUP BY card_id
 )
 """
+
+
+ORDERS = {
+    "due": "c.due, c.id",          # 期日が古い順
+    "random": "random()",          # ランダム
+    "added": "c.id",               # 追加した順（古い → 新しい）
+    "added_desc": "c.id DESC",     # 追加した順（新しい → 古い）
+}
+TAG_MODES = ("or", "and")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def card_filter(subject: str = "", tags=None, tag_mode: str = "or") -> tuple[str, list]:
+    """科目・タグでの絞り込み条件（cards の別名は c）。"""
+    conds, params = [], []
+    if subject:
+        conds.append("c.subject = ?")
+        params.append(check_subject(subject))
+    tags = normalize_tags(tags)
+    if tags:
+        if tag_mode not in TAG_MODES:
+            raise ValueError(f"タグの条件が正しくありません: {tag_mode}")
+        marks = ",".join("?" * len(tags))
+        if tag_mode == "or":
+            conds.append(f"c.id IN (SELECT card_id FROM card_tags WHERE tag IN ({marks}))")
+            params += tags
+        else:
+            conds.append(f"c.id IN (SELECT card_id FROM card_tags WHERE tag IN ({marks})"
+                         " GROUP BY card_id HAVING COUNT(DISTINCT tag) = ?)")
+            params += [*tags, len(tags)]
+    return (" AND ".join(conds) or "1"), params
+
+
+def order_sql(order: str) -> str:
+    if order not in ORDERS:
+        raise ValueError(f"順番の指定が正しくありません: {order}")
+    return ORDERS[order]
 
 
 def _iso(dt: datetime) -> str:
@@ -131,6 +177,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(cards)")}
     if "masks" not in cols:
         conn.execute("ALTER TABLE cards ADD COLUMN masks TEXT NOT NULL DEFAULT '{}'")
+    rcols = {r[1] for r in conn.execute("PRAGMA table_info(reviews)")}
+    if "practice_session" not in rcols:
+        conn.execute("ALTER TABLE reviews ADD COLUMN practice_session TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_practice ON reviews(practice_session, card_id)")
 
 
 def _clean_text(value, name: str, required: bool) -> str:
@@ -156,16 +206,20 @@ class Store:
         return srs.study_date(self.now())
 
     # ---- カード ----
-    def add_card(self, subject: str, unit: str, front: str, back: str, masks=None) -> int:
+    def add_card(self, subject: str, unit: str, front: str, back: str, masks=None, tags=None) -> int:
+        tags = normalize_tags(tags)
         card_id = self._add_no_commit(subject, unit, front, back, masks)
+        self._set_tags(card_id, tags)
         self.conn.commit()
         return card_id
 
-    def add_many(self, subject: str, unit: str, pairs: list[tuple[str, str]]) -> list[int]:
+    def add_many(self, subject: str, unit: str, pairs: list[tuple[str, str]], tags=None) -> list[int]:
+        tags = normalize_tags(tags)
         ids = []
         try:
             for front, back in pairs:
                 ids.append(self._add_no_commit(subject, unit, front, back))
+                self._set_tags(ids[-1], tags)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -199,14 +253,29 @@ class Store:
                 raise ValueError(f"画像が見つかりません: {', '.join(f'[[img:{i}]]' for i in missing)}")
         return subject, unit, front, back, json.dumps(masks, ensure_ascii=False, separators=(",", ":"))
 
-    def update_card(self, card_id: int, subject: str, unit: str, front: str, back: str, masks=None) -> None:
+    def update_card(self, card_id: int, subject: str, unit: str, front: str, back: str, masks=None,
+                    tags=None) -> None:
+        """tags=None ならタグは変えない。"""
         self._require(card_id)
         subject, unit, front, back, masks = self._validate(subject, unit, front, back, masks)
+        if tags is not None:
+            self._set_tags(card_id, normalize_tags(tags))
         self.conn.execute(
             "UPDATE cards SET subject=?, unit=?, front=?, back=?, masks=?, updated_at=? WHERE id=?",
             (subject, unit, front, back, masks, _iso(self.now()), card_id),
         )
         self.conn.commit()
+
+    def _set_tags(self, card_id: int, tags: list[str]) -> None:
+        self.conn.execute("DELETE FROM card_tags WHERE card_id = ?", (card_id,))
+        self.conn.executemany("INSERT INTO card_tags(card_id, tag) VALUES (?, ?)", [(card_id, t) for t in tags])
+
+    def all_tags(self) -> list[dict]:
+        """使われているタグと枚数（多い順）。"""
+        rows = self.conn.execute(
+            "SELECT tag, COUNT(*) AS n FROM card_tags GROUP BY tag ORDER BY n DESC, tag"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def delete_card(self, card_id: int) -> None:
         self._require(card_id)
@@ -246,7 +315,8 @@ class Store:
 
     def _query_cards(self, where: str, params: list, order: str, limit: int, offset: int) -> list[dict]:
         sql = (
-            f"WITH {COUNTED_CTE} SELECT c.*, l.rating AS last_rating, COALESCE(reps.n, 0) AS reps"
+            f"WITH {COUNTED_CTE} SELECT c.*, l.rating AS last_rating, COALESCE(reps.n, 0) AS reps,"
+            " (SELECT group_concat(tag, char(31)) FROM card_tags t WHERE t.card_id = c.id) AS tags_joined"
             " FROM cards c LEFT JOIN last_rating l ON l.card_id = c.id"
             " LEFT JOIN reps ON reps.card_id = c.id "
             f"{where} {order} LIMIT ? OFFSET ?"
@@ -257,6 +327,8 @@ class Store:
     @staticmethod
     def _card_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
+        joined = d.pop("tags_joined", None)
+        d["tags"] = sorted(joined.split("\x1f")) if joined else []
         try:
             d["masks"] = json.loads(d.get("masks") or "{}")
         except ValueError:
@@ -272,7 +344,7 @@ class Store:
         return d
 
     def list_cards(self, q: str = "", subject: str = "", unit: str | None = None, level: str = "",
-                   due: str = "", sort: str = "due", limit: int = 50, offset: int = 0) -> dict:
+                   due: str = "", sort: str = "due", limit: int = 50, offset: int = 0, tag: str = "") -> dict:
         """カード一覧。level: new/good/fair/again/mature、due: due/next7/later。"""
         today = self.today()
         conds, params = [], []
@@ -286,6 +358,9 @@ class Store:
         if unit is not None:
             conds.append("c.unit = ?")
             params.append(unit)
+        if tag:
+            conds.append("c.id IN (SELECT card_id FROM card_tags WHERE tag = ?)")
+            params.append(tag)
         if level == "new":
             conds.append("l.rating IS NULL")
         elif level in srs.RATINGS:
@@ -383,70 +458,129 @@ class Store:
         return [dict(r) for r in rows]
 
     # ---- 学習セッション ----
-    def due_cards(self, subject: str = "") -> list[sqlite3.Row]:
-        today = self.today().isoformat()
-        if subject:
-            return self.conn.execute(
-                "SELECT * FROM cards WHERE due <= ? AND subject = ? ORDER BY due, id",
-                (today, check_subject(subject)),
-            ).fetchall()
-        return self.conn.execute("SELECT * FROM cards WHERE due <= ? ORDER BY due, id", (today,)).fetchall()
+    # 通常（期日のカード）: 期日が来たカードを選んだ順番で出し、最後に今日の ✖ を1回ずつ再確認。
+    # 練習（全カード）: 条件に合う全カードを1回ずつ出し、最後に ✖ を1回ずつ再確認。
+    #   練習の評価は session（練習の id）付きで記録し、間隔・集計には影響しない。
 
-    def pending_rechecks(self, subject: str = "") -> list[sqlite3.Row]:
-        """今日 ✖ にして、まだ再確認していないカード（✖ にした順）。"""
-        params: list = [self.today().isoformat()]
-        extra = ""
-        if subject:
-            extra = "AND c.subject = ?"
-            params.append(check_subject(subject))
+    def due_cards(self, subject: str = "", tags=None, tag_mode: str = "or", order: str = "due") -> list[sqlite3.Row]:
+        where, params = card_filter(subject, tags, tag_mode)
         return self.conn.execute(
-            "SELECT c.*, MAX(r.id) AS fail_id FROM cards c JOIN reviews r ON r.card_id = c.id"
-            " WHERE r.review_date = ? AND r.rating = 'again' AND r.is_recheck = 0"
-            " AND NOT EXISTS (SELECT 1 FROM reviews r2 WHERE r2.card_id = c.id"
-            "                 AND r2.is_recheck = 1 AND r2.id > r.id)"
-            f" {extra} GROUP BY c.id ORDER BY fail_id",
-            params,
+            f"SELECT * FROM cards c WHERE c.due <= ? AND {where} ORDER BY {order_sql(order)}",
+            [self.today().isoformat(), *params],
         ).fetchall()
 
-    def next_card(self, subject: str = "") -> dict:
-        """次に出すカード。期日の古い順 → すべて終わったら今日の ✖ の再確認。"""
-        due = self.due_cards(subject)
-        rechecks = self.pending_rechecks(subject)
-        due_ids = {r["id"] for r in due}
-        rechecks = [r for r in rechecks if r["id"] not in due_ids]
-        result = {"remaining_due": len(due), "remaining_recheck": len(rechecks), "card": None, "kind": None}
-        if due:
-            result["card"], result["kind"] = self.get_card(due[0]["id"]), "review"
+    def pending_rechecks(self, subject: str = "", tags=None, tag_mode: str = "or") -> list[sqlite3.Row]:
+        """今日 ✖ にして、まだ再確認していないカード（✖ にした順）。練習の評価は含めない。"""
+        where, params = card_filter(subject, tags, tag_mode)
+        return self.conn.execute(
+            "SELECT c.*, MAX(r.id) AS fail_id FROM cards c JOIN reviews r ON r.card_id = c.id"
+            " WHERE r.review_date = ? AND r.rating = 'again' AND r.is_recheck = 0 AND r.practice_session IS NULL"
+            " AND NOT EXISTS (SELECT 1 FROM reviews r2 WHERE r2.card_id = c.id AND r2.practice_session IS NULL"
+            "                 AND r2.is_recheck = 1 AND r2.id > r.id)"
+            f" AND {where} GROUP BY c.id ORDER BY fail_id",
+            [self.today().isoformat(), *params],
+        ).fetchall()
+
+    @staticmethod
+    def _check_session(session: str) -> str:
+        if not SESSION_RE.match(session or ""):
+            raise ValueError("練習の id が正しくありません")
+        return session
+
+    def practice_remaining(self, session: str, subject: str = "", tags=None, tag_mode: str = "or",
+                           order: str = "due") -> list[sqlite3.Row]:
+        """練習でまだ出していないカード。"""
+        where, params = card_filter(subject, tags, tag_mode)
+        return self.conn.execute(
+            f"SELECT * FROM cards c WHERE {where} AND c.id NOT IN"
+            " (SELECT card_id FROM reviews WHERE practice_session = ? AND is_recheck = 0)"
+            f" ORDER BY {order_sql(order)}",
+            [*params, self._check_session(session)],
+        ).fetchall()
+
+    def practice_rechecks(self, session: str) -> list[sqlite3.Row]:
+        """練習で ✖ にして、まだ再確認していないカード。"""
+        session = self._check_session(session)
+        return self.conn.execute(
+            "SELECT c.*, MAX(r.id) AS fail_id FROM cards c JOIN reviews r ON r.card_id = c.id"
+            " WHERE r.practice_session = ? AND r.rating = 'again' AND r.is_recheck = 0"
+            " AND NOT EXISTS (SELECT 1 FROM reviews r2 WHERE r2.card_id = c.id AND r2.practice_session = ?"
+            "                 AND r2.is_recheck = 1 AND r2.id > r.id)"
+            " GROUP BY c.id ORDER BY fail_id",
+            (session, session),
+        ).fetchall()
+
+    def session_counts(self, subject: str = "", tags=None, tag_mode: str = "or") -> dict:
+        """開始前の画面に出す枚数（期日のカード / 条件に合う全カード）。"""
+        where, params = card_filter(subject, tags, tag_mode)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM cards c WHERE {where}", params).fetchone()[0]
+        due = self.conn.execute(f"SELECT COUNT(*) FROM cards c WHERE c.due <= ? AND {where}",
+                                [self.today().isoformat(), *params]).fetchone()[0]
+        return {"due": due, "total": total}
+
+    def next_card(self, subject: str = "", tags=None, tag_mode: str = "or", order: str = "due",
+                  session: str | None = None) -> dict:
+        """次に出すカード。session があれば練習、なければ通常（期日のカード）。"""
+        if session:
+            first = self.practice_remaining(session, subject, tags, tag_mode, order)
+            rechecks = self.practice_rechecks(session)
+            kind = "practice"
+        else:
+            first = self.due_cards(subject, tags, tag_mode, order)
+            rechecks = self.pending_rechecks(subject, tags, tag_mode)
+            kind = "review"
+        first_ids = {r["id"] for r in first}
+        rechecks = [r for r in rechecks if r["id"] not in first_ids]
+        result = {"remaining_due": len(first), "remaining_recheck": len(rechecks), "card": None, "kind": None}
+        if first:
+            result["card"], result["kind"] = self.get_card(first[0]["id"]), kind
         elif rechecks:
             result["card"], result["kind"] = self.get_card(rechecks[0]["id"]), "recheck"
         return result
 
-    def record_review(self, card_id: int, rating: str) -> dict:
-        """評価を記録する。期日のカードなら通常の評価、今日 ✖ にしたカードなら再確認として扱う。"""
+    def record_review(self, card_id: int, rating: str, session: str | None = None) -> dict:
+        """評価を記録する。
+
+        通常: 期日のカードなら間隔を進め、今日 ✖ にしたカードなら再確認として記録する。
+        練習（session あり）: 間隔は変えずに記録する（✖ のカードは練習の最後に再確認）。
+        """
         if rating not in srs.RATINGS:
             raise ValueError(f"不明な評価です: {rating!r}")
         card = self._require(card_id)
         now = self.now()
         today = srs.study_date(now)
         stage = card["stage"]
-        if card["due"] <= today.isoformat():
+        new_stage, new_due = stage, date.fromisoformat(card["due"])
+        if session:
+            session = self._check_session(session)
+            done = self.conn.execute(
+                "SELECT 1 FROM reviews WHERE card_id = ? AND practice_session = ? AND is_recheck = 0",
+                (card_id, session)).fetchone()
+            if not done:
+                is_recheck = 0
+            elif any(r["id"] == card_id for r in self.practice_rechecks(session)):
+                is_recheck = 1
+            else:
+                raise ValueError("このカードはこの練習ですでに解きました")
+        elif card["due"] <= today.isoformat():
             new_stage, new_due = srs.apply_rating(stage, rating, today)
             is_recheck = 0
             self.conn.execute(
                 "UPDATE cards SET stage=?, due=? WHERE id=?", (new_stage, new_due.isoformat(), card_id)
             )
         elif any(r["id"] == card_id for r in self.pending_rechecks()):
-            new_stage, new_due, is_recheck = stage, date.fromisoformat(card["due"]), 1
+            is_recheck = 1
         else:
             raise ValueError("このカードは今日の学習対象ではありません")
         self.conn.execute(
-            "INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after, is_recheck)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (card_id, _iso(now), today.isoformat(), rating, stage, new_stage, is_recheck),
+            "INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after, is_recheck,"
+            " practice_session) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (card_id, _iso(now), today.isoformat(), rating, stage, new_stage, is_recheck, session or None),
         )
         self.conn.commit()
         return {"card_id": card_id, "stage": new_stage, "due": new_due.isoformat(),
-                "interval": srs.interval_for(new_stage), "recheck": bool(is_recheck)}
+                "interval": srs.interval_for(new_stage), "recheck": bool(is_recheck),
+                "practice": bool(session)}
 
 
 __all__ = ["connect", "Store", "SUBJECTS", "COUNTED_CTE"]

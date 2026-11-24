@@ -293,6 +293,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             con = connect()
             body = self.read_json()
+            if p[1:] == ["import"]:
+                # Word（.docx）を読み取って段落・表・画像の並びを返す（PDF は画面側で読む）
+                name = (body.get("name") or "").lower()
+                if not name.endswith(".docx"):
+                    return self.send_json({"error": "Word は .docx 形式のファイルにしてください（古い .doc は Word で開いて「名前を付けて保存」→ .docx）"}, 400)
+                import importer
+                try:
+                    items = importer.read_docx(base64.b64decode(body.get("data") or ""))
+                except Exception as e:  # noqa
+                    return self.send_json({"error": "Word ファイルを読み取れませんでした: " + str(e)}, 400)
+                return self.send_json({"items": items})
             if p[1:] == ["backup"]:
                 if not self.is_local():
                     return self.send_json({"error": "バックアップはツールを起動しているPCで行ってください"}, 403)

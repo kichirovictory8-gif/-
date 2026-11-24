@@ -531,6 +531,260 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
   });
 }
 
+
+// ============================================================
+// Word・PDF からの取り込み（大まかな形を自動で作る → あとで編集）
+// ============================================================
+function loadScript(src) {
+  return new Promise((ok, ng) => {
+    if (document.querySelector(`script[src="${src}"]`)) return ok();
+    const sc = document.createElement('script'); sc.src = src; sc.onload = ok; sc.onerror = () => ng(new Error('読み込み失敗: ' + src));
+    document.head.appendChild(sc);
+  });
+}
+function fileToBase64(file) {
+  return new Promise((ok, ng) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(',')[1]); fr.onerror = ng; fr.readAsDataURL(file); });
+}
+async function pdfToItems(file) {
+  await loadScript('/vendor/pdfjs/pdf.min.js');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true }).promise;
+  const items = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n);
+    const tc = await page.getTextContent();
+    const rows = [];
+    for (const it of tc.items) {
+      if (!it.str) continue;
+      const x = it.transform[4], y = it.transform[5], fs = Math.abs(it.transform[3]) || it.height || 10;
+      let row = rows.find(r => Math.abs(r.y - y) < fs * 0.4);
+      if (!row) { row = { y, fs, parts: [] }; rows.push(row); }
+      row.parts.push({ x, w: it.width, s: it.str });
+    }
+    rows.sort((a, b) => b.y - a.y);
+    const minX = Math.min(...rows.map(r => Math.min(...r.parts.map(p => p.x))));
+    let prevY = null;
+    for (const r of rows) {
+      r.parts.sort((a, b) => a.x - b.x);
+      let text = '', end = null;
+      for (const pt of r.parts) {
+        if (end !== null && pt.x - end > r.fs * 1.2) text += '　';
+        text += pt.s; end = pt.x + pt.w;
+      }
+      if (prevY !== null && prevY - r.y > r.fs * 2.4) items.push({ type: 'p', text: '', plain: '', ind: 0 });
+      prevY = r.y;
+      const ind = Math.max(0, Math.min(12, Math.round((r.parts[0].x - minX) / r.fs)));
+      items.push({ type: 'p', text, plain: text, ind, all_bold: false, any_underline: false, level: null, pdf: true });
+    }
+    items.push({ type: 'p', text: '', plain: '', ind: 0 });
+  }
+  return items;
+}
+function balanceMarks(t) {
+  for (const m of ['**', '__', '==', '!!']) {
+    const n = t.split(m).length - 1;
+    if (n % 2) { const i = t.indexOf(m); t = t.slice(0, i) + t.slice(i + m.length); }
+  }
+  return t.trim();
+}
+const stripMarks = t => String(t).replace(/\*\*|__|==|!!/g, '');
+function importLines(items) {
+  // 段落 → 1行ずつ（字下げは全角スペースで表す）
+  const out = [];
+  for (const it of items) {
+    if (it.type !== 'p') { out.push(it); continue; }
+    const rawLines = String(it.text).split('\n');
+    const plainLines = String(it.plain).split('\n');
+    rawLines.forEach((raw, k) => {
+      let lead = 0;
+      const m = raw.match(/^[\t 　]*/)[0];
+      for (const ch of m) lead += ch === '\t' ? 2 : ch === '　' ? 1 : 0.5;
+      let body = raw.slice(m.length).replace(/\t+/g, '　');
+      const plain = (plainLines[k] || '').replace(/\t+/g, '　').trim();
+      if (it.numbered && k === 0 && body && !/^[・●〇※★①-⑳\-]/.test(plain)) body = '・' + body;
+      out.push({ type: 'line', ind: Math.round((it.ind || 0) + lead), text: body, plain, bold: it.all_bold, under: it.any_underline, level: it.level, pdf: it.pdf });
+    });
+  }
+  return out;
+}
+function isImportTitle(l) {
+  if (l.type !== 'line') return false;
+  if (l.level === 1) return true;
+  return l.ind === 0 && /^●/.test(l.plain) && (l.pdf || l.bold || l.under);
+}
+const PCR_RE = /^(.{0,40}?℃\)?)\s*[、,，]\s*(.+?)$/;
+function pcrLine(plain) {
+  const m = plain.match(PCR_RE);
+  if (!m || plain.length > 60) return null;
+  let rest = m[2], cyc = '';
+  const c = rest.match(/^(.*?)[\s　]*([×xX]\s*\d+\s*(サイクル|cycles?|回))\s*$/);
+  if (c) { rest = c[1]; cyc = c[2].replace(/\s+/g, ''); }
+  if (!/(sec|min|秒|分|h|hr|∞|O\/N)/i.test(rest)) return null;
+  return { t: m[1].trim(), d: rest.trim(), cyc };
+}
+function linesToBlocks(lines) {
+  const blocks = [];
+  let run = [];
+  const isArrow = l => l.type === 'line' && /^[↓⇓]+$/.test(l.plain);
+  const flush = () => {
+    while (run.length && run[0].plain === '') run.shift();
+    while (run.length && run[run.length - 1].plain === '') run.pop();
+    if (!run.length) return;
+    const hasArrow = run.some(l => isArrow(l) || /^[↓⇓]/.test(l.plain));
+    const txt = [];
+    if (hasArrow) {
+      let prevStep = false, arrow = false;
+      for (const l of run) {
+        if (l.plain === '') continue;
+        if (isArrow(l)) { arrow = true; continue; }
+        let text = l.text, ind = l.ind;
+        if (/^[↓⇓]/.test(l.plain)) { arrow = true; text = balanceMarks(text.replace(/^(\*\*)?[↓⇓]+(\*\*)?[\s　]*/, '')); ind = Math.max(ind, 1); if (!text) continue; }
+        const isStep = ind === 0 && !/^[※＊*]/.test(stripMarks(text));
+        if (isStep) { if (prevStep && !arrow) txt.push(''); prevStep = true; arrow = false; }
+        txt.push('　'.repeat(ind) + text);
+      }
+      blocks.push({ type: 'steps', text: txt.join('\n') });
+    } else {
+      let blank = false;
+      for (const l of run) {
+        if (l.plain === '') { if (!blank) txt.push(''); blank = true; continue; }
+        blank = false; txt.push('　'.repeat(l.ind) + l.text);
+      }
+      blocks.push({ type: 'text', text: txt.join('\n') });
+    }
+    run = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.type === 'table') {
+      flush();
+      let rows = l.rows.map(r => r.map(c => c || ''));
+      const wrapped = c => !c || /^\*\*[^*].*\*\*$/.test(c);
+      const hr = rows.length > 1 && rows[0].every(wrapped);
+      const hc = rows.length > 1 && rows.slice(hr ? 1 : 0).every(r => wrapped(r[0]));
+      rows = rows.map((r, ri) => r.map((c, ci) => ((hr && ri === 0) || (hc && ci === 0)) ? c.replace(/^\*\*(.*)\*\*$/, '$1') : c));
+      blocks.push({ type: 'table', header_row: hr, header_col: hc, full: rows[0].length >= 5, rows });
+      continue;
+    }
+    if (l.type === 'image') { flush(); blocks.push({ type: 'image', src: l.src, width: 80 }); continue; }
+    const pl = l.plain;
+    // PCR条件（「98℃、10sec」のような行が3つ以上続く）
+    if (pcrLine(pl)) {
+      const steps = []; let j = i, cycAt = -1, cycText = '';
+      while (j < lines.length) {
+        const x = lines[j];
+        if (x.type !== 'line') break;
+        if (x.plain === '' || isArrow(x)) { j++; continue; }
+        const pc = pcrLine(x.plain);
+        if (!pc) break;
+        if (pc.cyc) { cycAt = steps.length; cycText = pc.cyc; }
+        steps.push({ t: pc.t, d: pc.d }); j++;
+      }
+      if (steps.length >= 3) {
+        let label = '';
+        const last = run.filter(x => x.plain !== '' && !isArrow(x)).pop();
+        if (last && /^[\s　]*PCR[\s　]*$/i.test(last.plain)) { run.splice(run.lastIndexOf(last), 1); label = 'PCR'; }
+        flush();
+        const from = cycAt < 0 ? '' : Math.max(0, cycAt - 1), to = cycAt < 0 ? '' : Math.min(steps.length - 1, cycAt + 1);
+        blocks.push({ type: 'pcr', label: label || 'PCR', steps, cyc_from: from, cyc_to: to, cyc_text: cycText });
+        i = j - 1;
+        continue;
+      }
+    }
+    // 見出し
+    let h = null;
+    const short = pl.length <= 40;
+    if (short && /^【[^】]+】/.test(pl)) h = ['【】', '【', '】'];
+    else if (short && /^〈[^〉]+〉/.test(pl)) h = ['〈〉', '〈', '〉'];
+    else if (short && /^<[^>]+>/.test(pl)) h = ['〈〉', '<', '>'];
+    else if (short && /^［[^］]+］|^\[[^\]]+\]/.test(pl)) h = ['[]', pl[0], pl[0] === '［' ? '］' : ']'];
+    else if (/^●/.test(pl) && l.ind <= 1) h = ['●', '●', null];
+    else if (short && /^★/.test(pl) && l.bold) h = ['★', '★', null];
+    else if (l.level && l.level >= 2 && short) h = ['なし', null, null];
+    if (h) {
+      flush();
+      let text, extra = '';
+      if (h[2]) {
+        const close = pl.indexOf(h[2]);
+        text = pl.slice(1, close);
+        const ci = l.text.indexOf(h[2]);
+        extra = ci >= 0 ? balanceMarks(l.text.slice(ci + 1)) : pl.slice(close + 1);
+      } else text = h[1] ? pl.slice(1) : pl;
+      blocks.push({ type: 'heading', style: h[0], text: text.trim(), extra, indent: l.ind || 0 });
+      continue;
+    }
+    run.push(l);
+  }
+  flush();
+  return blocks;
+}
+function structureImport(items, fname) {
+  const lines = importLines(items);
+  const stem = fname.replace(/\.[^.]+$/, '');
+  const starts = [];
+  lines.forEach((l, i) => { if (isImportTitle(l)) starts.push(i); });
+  const make = (title, ls) => ({ name: title, title, blocks: linesToBlocks(ls), memo: { text: '', print: false } });
+  if (!starts.length) return [make(stem, lines)].filter(p => p.blocks.length);
+  const out = [];
+  const pre = lines.slice(0, starts[0]);
+  const preText = pre.filter(l => l.type !== 'line' || l.plain).map(l => l.plain || '').join('');
+  if (preText.length > 30 && !/目次/.test(preText.slice(0, 10))) out.push(make(stem, pre));
+  starts.forEach((st, k) => {
+    const title = lines[st].plain.replace(/^●\s*/, '').trim() || stem;
+    out.push(make(title, lines.slice(st + 1, k + 1 < starts.length ? starts[k + 1] : lines.length)));
+  });
+  return out;
+}
+let pendingImport = null;
+async function importFile(file) {
+  const name = file.name || '';
+  const low = name.toLowerCase();
+  let items;
+  toast('読み取り中…');
+  try {
+    if (low.endsWith('.docx')) items = (await api.send('POST', 'import', { name, data: await fileToBase64(file) })).items;
+    else if (low.endsWith('.pdf')) items = await pdfToItems(file);
+    else if (low.endsWith('.txt')) items = (await file.text()).split(/\r?\n/).map(t => ({ type: 'p', text: t, plain: t, ind: 0, pdf: true }));
+    else if (low.endsWith('.doc')) { alert('古い Word 形式（.doc）は読めません。Word で開いて「名前を付けて保存」→「Word 文書 (*.docx)」で保存してから取り込んでください。'); return; }
+    else { alert('取り込めるのは Word（.docx）・PDF・テキスト（.txt）です。'); return; }
+  } catch (e) { if (!/保存・読み込み/.test(String(e))) alert('読み取れませんでした: ' + e.message); return; }
+  const protos = structureImport(items, name);
+  if (!protos.length) { alert('文字を読み取れませんでした。（画像だけのPDF＝スキャンした紙などは読み取れません）'); return; }
+  if (protos.length === 1) { pendingImport = protos[0]; go('#/protocol/new'); return; }
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal"><h3 style="margin-top:0">${protos.length} 件のプロトコルが見つかりました</h3>
+    <p class="muted">「●」で始まる太字・下線の行を題名とみなして分けました。登録するものにチェックを入れ、名前を確認してください。登録後に「編集」でいつでも直せます。</p>
+    <table class="list">${protos.map((p, i) => `<tr><td><input type="checkbox" data-i="${i}" checked></td><td><input type="text" data-n="${i}" value="${esc(p.name)}" style="width:100%"></td><td class="muted">${p.blocks.length} ブロック</td><td><button class="small" data-open="${i}">これだけ編集画面で開く</button></td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:12px"><span class="spacer"></span><button data-x>やめる</button><button class="primary" data-ok>チェックしたものを登録</button></div></div>`;
+  document.body.appendChild(bg);
+  const nameOf = i => bg.querySelector(`[data-n="${i}"]`).value.trim() || protos[i].name;
+  bg.onclick = async e => {
+    const t = e.target;
+    if (t.dataset.x !== undefined) bg.remove();
+    else if (t.dataset.open !== undefined) { const p = protos[+t.dataset.open]; p.name = nameOf(+t.dataset.open); pendingImport = p; bg.remove(); go('#/protocol/new'); }
+    else if (t.dataset.ok !== undefined) {
+      const sel = [...bg.querySelectorAll('input[data-i]:checked')].map(c => +c.dataset.i);
+      if (!sel.length) return;
+      for (const i of sel) { const p = protos[i]; p.name = nameOf(i); await api.send('POST', 'protocols', { data: p }); }
+      bg.remove(); toast(`${sel.length} 件を登録しました`);
+      if (location.hash === '#/protocols') viewProtocols(); else go('#/protocols');
+    }
+  };
+}
+function importCardHtml() {
+  return `<div class="card drop" id="drop"><div class="row"><b>Word・PDFから取り込む</b>
+    <label class="btn primary">ファイルを選ぶ<input type="file" id="impfile" accept=".docx,.pdf,.txt,.doc" hidden></label>
+    <span class="muted">またはここにファイルをドラッグ＆ドロップ。今までのプロトコルから大まかな形を自動で作ります（取り込んだ後に自由に直せます）。</span></div></div>`;
+}
+function bindImportCard() {
+  const inpEl = document.getElementById('impfile'), drop = document.getElementById('drop');
+  inpEl.onchange = () => { if (inpEl.files[0]) importFile(inpEl.files[0]); inpEl.value = ''; };
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) importFile(e.dataTransfer.files[0]); };
+}
+
 // ============================================================
 // 各画面
 // ============================================================
@@ -555,7 +809,7 @@ function showBanner(kind, msg, btnLabel, onClick) {
   d.className = 'banner no-print';
   d.innerHTML = `<span>${esc(msg)}</span>${btnLabel ? `<button>${esc(btnLabel)}</button>` : ''}`;
   if (btnLabel) d.querySelector('button').onclick = onClick;
-  document.body.insertBefore(d, document.body.firstChild.nextSibling);
+  document.querySelector('.topbar').insertAdjacentElement('afterend', d);
   banners[kind] = d;
 }
 function hideBanner(kind) { if (banners[kind]) { banners[kind].remove(); delete banners[kind]; } }
@@ -619,12 +873,14 @@ async function viewHome() {
 async function viewProtocols() {
   const ps = await api.get('protocols');
   $app.innerHTML = `<div class="row"><h2>プロトコルの管理</h2><span class="spacer"></span><button class="primary" id="newp">＋ 新しいプロトコル</button></div>
+    ${importCardHtml()}
     <div class="card"><table class="list"><tr><th style="width:70px">順番</th><th>名前</th><th>更新</th><th></th></tr>
     ${ps.map((p, i) => `<tr><td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === ps.length - 1 ? 'disabled' : ''}>↓</button></td>
       <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td class="muted">${esc(p.updated.slice(0, 16))}</td>
       <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
       <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table></div>`;
   document.getElementById('newp').onclick = () => go('#/protocol/new');
+  bindImportCard();
   const sig = JSON.stringify(ps);
   pollFn = sameView(async () => { if (JSON.stringify(await quietGet('protocols')) !== sig) await rerenderKeepScroll(viewProtocols); });
   $app.onclick = async e => {
@@ -638,9 +894,11 @@ async function viewProtocols() {
 async function viewProtocolEdit(id) {
   $app.onclick = null;
   let base = null, doc;
-  if (id === 'new') doc = { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } };
+  const imported = id === 'new' && pendingImport;
+  if (imported) { doc = pendingImport; pendingImport = null; }
+  else if (id === 'new') doc = { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } };
   else { const pr = await api.get('protocols/' + id); doc = pr.data; base = pr.updated; }
-  if (id === 'new') { doc.blocks[0].text = '材料'; }
+  if (id === 'new' && !imported) { doc.blocks[0].text = '材料'; }
   $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
       <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
       <a class="btn" href="#/protocols">一覧へ戻る</a> <button class="primary" id="save">保存</button></div></div>
@@ -652,6 +910,7 @@ async function viewProtocolEdit(id) {
   mountEditor(document.getElementById('ed'), doc, () => { dirty = true; clearTimeout(t); t = setTimeout(draw, 250); });
   chem.onchange = draw;
   draw();
+  if (imported) { dirty = true; showBanner('data', '取り込んだ内容です。右の印刷イメージを見ながら直して、最後に「保存」を押してください（まだ保存されていません）。'); }
   document.getElementById('save').onclick = async () => {
     if (!doc.name) doc.name = doc.title || '無題';
     if (id === 'new') { const r = await api.send('POST', 'protocols', { data: doc }); dirty = false; toast('保存しました'); go('#/protocol/' + r.id); }

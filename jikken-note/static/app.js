@@ -199,7 +199,8 @@ function renderMaterials(b, bp, ctx) {
   if (b.total !== '' && b.total != null) {
     rows += `<tr class="total"><td class="nm">　${esc(b.total_label || 'Total')}</td><td>：</td><td class="amt">${amt(c.total, b.total_unit || '')}</td><td>（${fmtNum(c.total)}${esc(b.total_unit || '')}${c.vol ? '/L' : ''}）</td><td></td></tr>`;
   }
-  return `<div class="mat"><div class="mat-h"><span>${head}</span><span class="r">${c.vol ? '' : '（×１量）'}</span></div><table class="mat-t">${rows}</table></div>`;
+  const hdr = c.vol ? '' : '<tr class="mh"><td></td><td></td><td></td><td>（×１量）</td><td></td></tr>';
+  return `<div class="mat"><div class="mat-h"><span>${head}</span></div><table class="mat-t">${hdr}${rows}</table></div>`;
 }
 function renderTable(b, bp, ctx) {
   let h = `<table class="grid${b.full ? ' full' : ''}">`;

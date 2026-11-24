@@ -139,9 +139,11 @@ function tokenHtml(t, k, ctx) {
 // ============================================================
 const HANG = /^[・※★→⇒〇●◎①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/;
 function splitIndent(line) {
-  const m = line.match(/^[ 　\t]*/)[0];
+  // 行頭の空白（半角・全角・タブ・Word由来の特殊なスペース）を字下げとして数える
+  const m = line.match(/^[ 　\t\u00a0\u2000-\u200b\u202f\u205f]*/)[0];
   let ind = 0;
-  for (const ch of m) ind += ch === '　' ? 1 : ch === '\t' ? 2 : 0.5;
+  for (const ch of m) ind += ch === '　' ? 1 : ch === '\t' ? 2 : ch === '\u200b' ? 0 : 0.5;
+  if (m.length && ind === 0) ind = 0.5;
   return { ind, text: line.slice(m.length) };
 }
 function lineHtml(text, ind, ctx, extraCls = '') {
@@ -157,17 +159,24 @@ function renderSteps(str, ctx) {
   // 1行1ステップ。字下げした行・※で始まる行は補足。
   // ステップの間には下向きの矢印を自動で入れる。補足があるときは、矢印が補足の横を通って長くなる。
   // 空行で区切ると矢印は入らない。
+  // 行頭に空白（半角・全角）がある行と「※」で始まる行は補足。補足の間の空行も飛び越えて、
+  // 次の「行頭から始まる行」まで矢印をつなげる。空行のすぐ後が行頭から始まる行なら矢印は入らない。
+  const isNote = (ind, text) => ind > 0 || /^[※＊*]/.test(String(text).replace(/\*\*|__|==|!!/g, ''));
+  const rows = String(str || '').split('\n').map(splitIndent).filter(r => !/^[↓⇓]$/.test(r.text.trim()));
   const groups = [[]];
-  for (const raw of String(str || '').split('\n')) {
-    const { ind, text } = splitIndent(raw);
-    if (text === '') { if (groups[groups.length - 1].length) groups.push([]); continue; }
-    if (/^[↓⇓]$/.test(text.trim())) continue;
+  rows.forEach((r, i) => {
     const g = groups[groups.length - 1];
-    const isStep = ind === 0 && !/^[※＊*]/.test(String(text).replace(/\*\*|__|==|!!/g, ''));
-    if (isStep) g.push({ step: text, notes: [] });
-    else if (g.length) g[g.length - 1].notes.push({ ind, text });
-    else g.push({ step: null, notes: [{ ind, text }] });
-  }
+    if (r.text.trim() === '') {
+      const next = rows.slice(i + 1).find(x => x.text.trim() !== '');
+      if (g.length && next && isNote(next.ind, next.text)) g[g.length - 1].notes.push({ blank: true });
+      else if (g.length) groups.push([]);
+      return;
+    }
+    if (!isNote(r.ind, r.text)) g.push({ step: r.text, notes: [] });
+    else if (g.length) g[g.length - 1].notes.push({ ind: r.ind, text: r.text });
+    else g.push({ step: null, notes: [{ ind: r.ind, text: r.text }] });
+  });
+  const noteHtml = (n, minInd) => n.blank ? '<div class="gap"></div>' : lineHtml(n.text, Math.max(n.ind, minInd), ctx);
   const parts = [];
   for (const g of groups) {
     if (!g.length) continue;
@@ -176,9 +185,9 @@ function renderSteps(str, ctx) {
       if (st.step !== null) h += `<div class="stepgrp">${lineHtml(st.step, 0, ctx)}</div>`;
       const next = g[i + 1];
       if (st.step !== null && next && next.step !== null) {
-        h += `<div class="flow"><div class="flow-arrow"></div>${st.notes.map(n => lineHtml(n.text, Math.max(n.ind, 1.2), ctx)).join('')}<div class="flow-end"></div></div>`;
+        h += `<div class="flow"><div class="flow-arrow"></div>${st.notes.map(n => noteHtml(n, 1.2)).join('')}<div class="flow-end"></div></div>`;
       } else {
-        h += st.notes.map(n => lineHtml(n.text, n.ind, ctx)).join('');
+        h += st.notes.map(n => noteHtml(n, 0)).join('');
       }
     });
     parts.push(h);
@@ -430,7 +439,7 @@ function blockEditorHtml(b, i, n) {
         字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
       break;
     case 'steps':
-      body = `<div class="muted">1行に1ステップ。ステップの間には下向きの矢印が自動で入ります。行頭を全角スペースで字下げした行と「※」で始まる行は補足になり、補足があると矢印がその横を通って長くなります。空行で区切ると矢印は入りません。</div>${ta(bp + '.text', b.text, 6)}
+      body = `<div class="muted">1行に1ステップ。ステップの間には下向きの矢印が自動で入ります。行頭にスペース（半角・全角どちらでも）がある行と「※」で始まる行は補足になり、矢印は補足（間の空行も含む）を飛び越えて次の行頭から始まる行まで続きます。空行のすぐ後に行頭から始まる行を書くと、そこには矢印が入りません。</div>${ta(bp + '.text', b.text, 6)}
         <div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
       break;
     case 'text':

@@ -42,6 +42,15 @@ MIME = {
 }
 
 
+def app_version():
+    """ツール本体のファイルの更新日時。変わったら開いている画面に「再読み込み」を出す"""
+    latest = os.path.getmtime(os.path.abspath(__file__))
+    for root, _, files in os.walk(STATIC):
+        for f in files:
+            latest = max(latest, os.path.getmtime(os.path.join(root, f)))
+    return str(int(latest))
+
+
 def lan_addresses():
     """他のPCから開くときのアドレス候補"""
     names = [socket.gethostname()]
@@ -271,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(row_record(r)) if r else self.send_json({"error": "not found"}, 404)
             if p[1] == "info":
                 return self.send_json({"db": DB_PATH, "backup_dir": BACKUP_DIR, "share": SHARE,
-                                       "local": self.is_local(), "password": bool(PASSWORD),
+                                       "local": self.is_local(), "password": bool(PASSWORD), "version": app_version(),
                                        "addresses": lan_addresses() if SHARE else []})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:  # noqa

@@ -351,23 +351,48 @@ function newBlock(type) {
 }
 let lastField = null;
 document.addEventListener('focusin', e => { if (e.target.matches('.blk textarea, .blk input[type=text], .meta input[type=text], .meta textarea')) lastField = e.target; });
-function wrapSel(before, after, placeholder) {
-  const el = lastField;
+const MARKS = { var: ['[[', ']]', 'ラベル'], b: ['**', '**', '文字'], hl: ['==', '==', '文字'], red: ['!!', '!!', '文字'], u: ['__', '__', '文字'], box: ['||', '||', '文字'], sup: ['^{', '}', '上'], sub: ['_{', '}', '下'] };
+// Word と同じように「もう一度押すと解除」になる
+function wrapSel(before, after, placeholder, el = lastField) {
   if (!el) { alert('先に、書式を付けたい欄をクリックしてください。'); return; }
-  const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? el.value.length;
-  const sel = el.value.slice(s, e) || placeholder;
-  el.value = el.value.slice(0, s) + before + sel + after + el.value.slice(e);
+  const v = el.value;
+  let s = el.selectionStart ?? v.length, e = el.selectionEnd ?? v.length;
+  const sel = v.slice(s, e);
+  if (sel.length >= before.length + after.length && sel.startsWith(before) && sel.endsWith(after)) {
+    const inner = sel.slice(before.length, sel.length - after.length);
+    el.value = v.slice(0, s) + inner + v.slice(e);
+    el.selectionStart = s; el.selectionEnd = s + inner.length;
+  } else if (v.slice(s - before.length, s) === before && v.slice(e, e + after.length) === after && s - before.length >= 0) {
+    el.value = v.slice(0, s - before.length) + sel + v.slice(e + after.length);
+    el.selectionStart = s - before.length; el.selectionEnd = e - before.length;
+  } else {
+    const t = sel || placeholder;
+    el.value = v.slice(0, s) + before + t + after + v.slice(e);
+    el.selectionStart = s + before.length; el.selectionEnd = s + before.length + t.length;
+  }
   el.focus();
-  el.selectionStart = s + before.length; el.selectionEnd = s + before.length + sel.length;
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
+// キーボードショートカット（編集欄の中で有効）
+//   Ctrl+B 太字 / Ctrl+U 下線 / Ctrl+Alt+H 強調(黄) / Ctrl+Alt+R 注意(赤) / Ctrl+Alt+V 可変欄
+const SHORTCUTS = { 'ctrl+KeyB': 'b', 'ctrl+KeyU': 'u', 'ctrl+alt+KeyH': 'hl', 'ctrl+alt+KeyR': 'red', 'ctrl+alt+KeyV': 'var' };
+document.addEventListener('keydown', e => {
+  if (e.isComposing || !(e.ctrlKey || e.metaKey) || e.shiftKey) return;
+  const el = e.target;
+  if (!el.matches || !el.matches('.blk textarea, .blk input[type=text], .meta input[type=text], .meta textarea')) return;
+  const k = SHORTCUTS[(e.altKey ? 'ctrl+alt+' : 'ctrl+') + e.code];
+  if (!k) return;
+  e.preventDefault();
+  lastField = el;
+  wrapSel(...MARKS[k], el);
+});
 function markupBar() {
   return `<div class="mk"><span class="muted">選んだ文字に書式：</span>
-    <button type="button" data-mk="var" title="毎回変わる欄。[[ラベル]] または [[ラベル=既定値]]">可変欄 [[ ]]</button>
-    <button type="button" data-mk="b"><b>太字</b></button>
-    <button type="button" data-mk="hl" style="background:#fff200">強調(黄)</button>
-    <button type="button" data-mk="red" style="color:#e00000">注意(赤)</button>
-    <button type="button" data-mk="u"><u>下線</u></button>
+    <button type="button" data-mk="var" title="毎回変わる欄。[[ラベル]] または [[ラベル=既定値]]（Ctrl+Alt+V）">可変欄 [[ ]] <span class="kbd">Ctrl+Alt+V</span></button>
+    <button type="button" data-mk="b" title="Ctrl+B"><b>太字</b> <span class="kbd">Ctrl+B</span></button>
+    <button type="button" data-mk="u" title="Ctrl+U"><u>下線</u> <span class="kbd">Ctrl+U</span></button>
+    <button type="button" data-mk="hl" style="background:#fff200" title="Ctrl+Alt+H">強調(黄) <span class="kbd">Ctrl+Alt+H</span></button>
+    <button type="button" data-mk="red" style="color:#e00000" title="Ctrl+Alt+R">注意(赤) <span class="kbd">Ctrl+Alt+R</span></button>
     <button type="button" data-mk="box">枠囲み</button>
     <button type="button" data-mk="sup">上付き x<sup>2</sup></button>
     <button type="button" data-mk="sub">下付き x<sub>2</sub></button></div>`;
@@ -375,9 +400,7 @@ function markupBar() {
 function bindMarkupBar(root) {
   root.querySelectorAll('[data-mk]').forEach(btn => btn.onmousedown = e => {
     e.preventDefault();
-    const k = btn.dataset.mk;
-    const m = { var: ['[[', ']]', 'ラベル'], b: ['**', '**', '文字'], hl: ['==', '==', '文字'], red: ['!!', '!!', '文字'], u: ['__', '__', '文字'], box: ['||', '||', '文字'], sup: ['^{', '}', '上'], sub: ['_{', '}', '下'] }[k];
-    wrapSel(...m);
+    wrapSel(...MARKS[btn.dataset.mk]);
   });
 }
 function ta(bind, val, rows) {
@@ -522,9 +545,39 @@ const routes = [
   [/^#\/help$/, viewHelp],
 ];
 let currentHash = location.hash;
+// 開いている画面を8秒ごとに確認し、他の人の保存やツールの更新を反映する
+let pollFn = null, appVersion = null;
+async function quietGet(u) { const r = await fetch('/api/' + u, { cache: 'no-store' }); if (!r.ok) throw new Error(r.status); return r.json(); }
+const banners = {};
+function showBanner(kind, msg, btnLabel, onClick) {
+  if (banners[kind]) return;
+  const d = document.createElement('div');
+  d.className = 'banner no-print';
+  d.innerHTML = `<span>${esc(msg)}</span>${btnLabel ? `<button>${esc(btnLabel)}</button>` : ''}`;
+  if (btnLabel) d.querySelector('button').onclick = onClick;
+  document.body.insertBefore(d, document.body.firstChild.nextSibling);
+  banners[kind] = d;
+}
+function hideBanner(kind) { if (banners[kind]) { banners[kind].remove(); delete banners[kind]; } }
+function sameView(fn) { const h = location.hash; return async () => { if (location.hash === h) await fn(); }; }
+async function rerenderKeepScroll(fn) { const y = window.scrollY; await fn(); window.scrollTo(0, y); }
+setInterval(async () => {
+  if (document.hidden) return;
+  try {
+    const info = await quietGet('info');
+    if (appVersion && info.version !== appVersion) {
+      showBanner('ver', 'ツールが新しくなりました。最新の画面にするには再読み込みしてください。', '再読み込み', () => { if (leaveOk()) location.reload(); });
+    }
+    if (!appVersion) appVersion = info.version;
+    if (pollFn) await pollFn();
+  } catch (e) { /* つながらない間は何もしない */ }
+}, 8000);
+quietGet('info').then(i => { appVersion = i.version; }).catch(() => {});
 async function router() {
   if (location.hash !== currentHash && !leaveOk()) { history.replaceState(null, '', currentHash); return; }
   currentHash = location.hash;
+  pollFn = null;
+  hideBanner('data');
   document.body.classList.toggle('printmode', location.hash.startsWith('#/print/'));
   window.scrollTo(0, 0);
   for (const [re, fn] of routes) { const m = location.hash.match(re); if (m) return fn(...m.slice(1)); }
@@ -553,6 +606,14 @@ async function viewHome() {
       <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>` : ''}`;
   document.getElementById('start').onclick = () => go('#/new/' + document.getElementById('psel').value);
   if (info.local) document.getElementById('bk').onclick = async () => { const r = await api.send('POST', 'backup'); toast('バックアップしました'); alert('バックアップを作成しました：\n' + r.path); };
+  const sig = JSON.stringify([ps, rs]);
+  pollFn = sameView(async () => {
+    const [a, b] = await Promise.all([quietGet('protocols'), quietGet('records')]);
+    if (JSON.stringify([a, b]) === sig) return;
+    const sel = document.getElementById('psel').value;
+    await rerenderKeepScroll(viewHome);
+    const ps2 = document.getElementById('psel'); if (ps2 && [...ps2.options].some(o => o.value === sel)) ps2.value = sel;
+  });
 }
 
 async function viewProtocols() {
@@ -564,6 +625,8 @@ async function viewProtocols() {
       <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
       <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table></div>`;
   document.getElementById('newp').onclick = () => go('#/protocol/new');
+  const sig = JSON.stringify(ps);
+  pollFn = sameView(async () => { if (JSON.stringify(await quietGet('protocols')) !== sig) await rerenderKeepScroll(viewProtocols); });
   $app.onclick = async e => {
     const t = e.target;
     if (t.dataset.mv) { await api.send('POST', `protocols/${t.dataset.id}/move`, { dir: +t.dataset.mv }); viewProtocols(); }
@@ -592,8 +655,14 @@ async function viewProtocolEdit(id) {
   document.getElementById('save').onclick = async () => {
     if (!doc.name) doc.name = doc.title || '無題';
     if (id === 'new') { const r = await api.send('POST', 'protocols', { data: doc }); dirty = false; toast('保存しました'); go('#/protocol/' + r.id); }
-    else { const u = await putWithCheck('protocols/' + id, doc, base); if (u) { base = u; dirty = false; toast('保存しました'); } }
+    else { const u = await putWithCheck('protocols/' + id, doc, base); if (u) { base = u; dirty = false; hideBanner('data'); toast('保存しました'); } }
   };
+  if (id !== 'new') pollFn = sameView(async () => {
+    const pr = await quietGet('protocols/' + id);
+    if (!(pr.updated > base)) return;
+    if (!dirty) { await rerenderKeepScroll(() => viewProtocolEdit(id)); toast('他の人の更新を反映しました'); }
+    else showBanner('data', '他の人がこのプロトコルを更新しました。このまま保存すると確認が出ます。', '相手の内容を読み込む（自分の変更は捨てる）', () => { dirty = false; hideBanner('data'); viewProtocolEdit(id); });
+  });
 }
 
 async function viewNewRecord(pid) {
@@ -675,6 +744,7 @@ function recordEditor(rec, id, base) {
     if (id) { const u = await putWithCheck('records/' + id, rec, base); if (!u) return null; base = u; }
     else { const r = await api.send('POST', 'records', { data: rec }); id = r.id; base = (await api.get('records/' + id)).updated; }
     dirty = false;
+    hideBanner('data');
     return id;
   };
   document.getElementById('save').onclick = async () => {
@@ -689,15 +759,28 @@ function recordEditor(rec, id, base) {
     if (!(await save())) return;
     go('#/print/' + id);
   };
+  pollFn = sameView(async () => {
+    if (!id) return;
+    const r = await quietGet('records/' + id);
+    if (!(r.updated > base)) return;
+    if (!dirty) { await rerenderKeepScroll(() => viewRecord(id)); toast('他の人の更新を反映しました'); }
+    else showBanner('data', '他の人がこの記録を更新しました。このまま保存すると確認が出ます。', '相手の内容を読み込む（自分の変更は捨てる）', () => { dirty = false; hideBanner('data'); viewRecord(id); });
+  });
 }
 
 async function viewRecords() {
   $app.onclick = null;
   $app.innerHTML = `<div class="row"><h2>記録の一覧</h2><span class="spacer"></span><input type="text" id="q" placeholder="検索（プロトコル名・日付・中身の文字）" style="width:320px"></div><div class="card" id="list">読み込み中…</div>`;
   const list = document.getElementById('list');
+  let sig = '';
+  pollFn = sameView(async () => {
+    const q = document.getElementById('q').value.trim();
+    if (JSON.stringify(await quietGet('records' + (q ? '?q=' + encodeURIComponent(q) : ''))) !== sig) await load();
+  });
   const load = async () => {
     const q = document.getElementById('q').value.trim();
     const rs = await api.get('records' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    sig = JSON.stringify(rs);
     list.innerHTML = rs.length ? `<table class="list"><tr><th>No.</th><th>実験日</th><th>プロトコル</th><th>保存</th><th>印刷</th><th></th></tr>
       ${rs.map(r => `<tr><td>${r.id}</td><td>${esc(r.exp_date)}</td><td><a href="#/record/${r.id}">${esc(r.protocol_name)}</a></td>
         <td class="muted">${esc(r.updated.slice(0, 16))}</td><td class="muted">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td>
@@ -724,6 +807,7 @@ async function viewPrint(id) {
     ${renderDoc(rec.doc, { mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}
     <div class="cutguide ${rec.opts.cut ? 'on' : ''}"></div>`;
   document.getElementById('pr').onclick = () => window.print();
+  pollFn = sameView(async () => { const r2 = await quietGet('records/' + id); if (r2.updated !== r.updated) await rerenderKeepScroll(() => viewPrint(id)); });
   window.onafterprint = async () => { if (location.hash === '#/print/' + id) { await api.send('POST', `records/${id}/printed`); toast('印刷日時を記録しました'); } };
 }
 

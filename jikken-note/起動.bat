@@ -13,7 +13,7 @@ if %errorlevel%==0 (
 )
 echo Python が見つかりませんでした。
 echo https://www.python.org/ から Python をインストールしてください。
-echo （インストール時に「Add python.exe to PATH」にチェックを入れてください）
+echo インストール時に「Add python.exe to PATH」にチェックを入れてください。
 :end
 echo.
 echo サーバが停止しました。何かキーを押すとこの画面を閉じます。

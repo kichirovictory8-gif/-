@@ -6,8 +6,10 @@ Python に最初から入っている機能だけで動きます（追加イン�
   - 画面:   static/ フォルダ
 起動すると自動でブラウザが開きます。この黒い画面を閉じると終了します。
 """
+import base64
 import json
 import os
+import socket
 import shutil
 import sqlite3
 import sys
@@ -18,12 +20,15 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-HOST = "127.0.0.1"   # 自分のPCからだけ接続できる
+HOST = "127.0.0.1"   # 自分のPCからだけ接続できる（--share のときは研究室のネットワークからも）
 PORT = 8765
+SHARE = "--share" in sys.argv
+PASSWORD = ""        # 共有モードの合言葉（password.txt に保存）
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
 DATA_DIR = os.path.join(BASE, "data")
 DB_PATH = os.path.join(DATA_DIR, "notebook.db")
+PASSWORD_FILE = os.path.join(DATA_DIR, "password.txt")
 BACKUP_DIR = os.path.join(BASE, "backup")
 AUTO_BACKUP_KEEP = 14
 
@@ -37,8 +42,28 @@ MIME = {
 }
 
 
+def lan_addresses():
+    """他のPCから開くときのアドレス候補"""
+    names = [socket.gethostname()]
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))   # 実際には送信しない（使用中のIPを調べるだけ）
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    ips.discard("127.0.0.1")
+    return [f"http://{h}:{PORT}/" for h in names + sorted(ips)]
+
+
 def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def connect():
@@ -174,13 +199,52 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def is_local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1")
+
+    def auth_ok(self):
+        """共有モードで合言葉が設定されているとき、他のPCからの接続には合言葉を求める"""
+        if not PASSWORD or self.is_local():
+            return True
+        h = self.headers.get("Authorization", "")
+        if h.startswith("Basic "):
+            try:
+                user_pass = base64.b64decode(h[6:]).decode("utf-8")
+                if user_pass.split(":", 1)[1] == PASSWORD:
+                    return True
+            except Exception:
+                pass
+        body = "合言葉が必要です".encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="jikken-note", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
+    def shortcut(self):
+        host = self.headers.get("Host") or f"{HOST}:{PORT}"
+        body = (f"[InternetShortcut]\r\nURL=http://{host}/\r\n"
+                f"IconFile=http://{host}/icon.ico\r\nIconIndex=0\r\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''%E5%AE%9F%E9%A8%93%E3%83%8E%E3%83%BC%E3%83%88%E5%8D%B0%E5%88%B7.url")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def parts(self):
         u = urlparse(self.path)
         return u, [p for p in u.path.split("/") if p]
 
     # ---------- routes ----------
     def do_GET(self):
+        if not self.auth_ok():
+            return
         u, p = self.parts()
+        if u.path == "/shortcut.url":
+            return self.shortcut()
         if not p or p[0] != "api":
             return self.serve_static(u.path)
         try:
@@ -206,17 +270,23 @@ class Handler(BaseHTTPRequestHandler):
                 r = con.execute("SELECT * FROM records WHERE id=?", (int(p[2]),)).fetchone()
                 return self.send_json(row_record(r)) if r else self.send_json({"error": "not found"}, 404)
             if p[1] == "info":
-                return self.send_json({"db": DB_PATH, "backup_dir": BACKUP_DIR})
+                return self.send_json({"db": DB_PATH, "backup_dir": BACKUP_DIR, "share": SHARE,
+                                       "local": self.is_local(), "password": bool(PASSWORD),
+                                       "addresses": lan_addresses() if SHARE else []})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:  # noqa
             self.send_json({"error": str(e)}, 500)
 
     def do_POST(self):
+        if not self.auth_ok():
+            return
         u, p = self.parts()
         try:
             con = connect()
             body = self.read_json()
             if p[1:] == ["backup"]:
+                if not self.is_local():
+                    return self.send_json({"error": "バックアップはツールを起動しているPCで行ってください"}, 403)
                 return self.send_json({"path": backup()})
             if p[1] == "protocols":
                 if len(p) == 2:
@@ -278,10 +348,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(e)}, 500)
 
     def do_PUT(self):
+        if not self.auth_ok():
+            return
         u, p = self.parts()
         try:
             con = connect()
-            data = self.read_json()["data"]
+            body = self.read_json()
+            data = body["data"]
+            table = {"protocols": "protocols", "records": "records"}[p[1]]
+            cur = con.execute(f"SELECT updated FROM {table} WHERE id=?", (int(p[2]),)).fetchone()
+            if cur is None:
+                return self.send_json({"error": "見つかりません（削除された可能性があります）"}, 404)
+            # 同時編集の上書き防止：開いた後に別の人が保存していたら知らせる
+            if body.get("base") and body["base"] != cur["updated"] and not body.get("force"):
+                return self.send_json({"conflict": True, "updated": cur["updated"]}, 409)
             if p[1] == "protocols":
                 con.execute("UPDATE protocols SET name=?, data=?, updated=? WHERE id=?",
                             (data.get("name") or "無題", json.dumps(data, ensure_ascii=False), now(), int(p[2])))
@@ -290,11 +370,14 @@ class Handler(BaseHTTPRequestHandler):
                             (data.get("protocol_name", ""), data.get("exp_date", ""),
                              json.dumps(data, ensure_ascii=False), now(), int(p[2])))
             con.commit()
-            self.send_json({"ok": True})
+            new = con.execute(f"SELECT updated FROM {table} WHERE id=?", (int(p[2]),)).fetchone()["updated"]
+            self.send_json({"ok": True, "updated": new})
         except Exception as e:  # noqa
             self.send_json({"error": str(e)}, 500)
 
     def do_DELETE(self):
+        if not self.auth_ok():
+            return
         u, p = self.parts()
         try:
             con = connect()
@@ -314,8 +397,25 @@ def already_running():
         return False
 
 
+def setup_password():
+    global PASSWORD
+    if os.path.exists(PASSWORD_FILE):
+        PASSWORD = open(PASSWORD_FILE, encoding="utf-8").read().strip()
+        return
+    print("共有モードを初めて使います。")
+    print("他のPCから開くときに入力する「合言葉」を決めてください。")
+    print("（何も入力せずに Enter を押すと合言葉なしになります。研究室外の人も開ける可能性があるので、設定をおすすめします）")
+    try:
+        PASSWORD = input("合言葉: ").strip()
+    except EOFError:
+        PASSWORD = ""
+    with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
+        f.write(PASSWORD)
+    print("合言葉を保存しました（変えるときは data\\password.txt を消して起動し直す）")
+
+
 def main():
-    url = f"http://{HOST}:{PORT}/"
+    url = f"http://127.0.0.1:{PORT}/"
     no_browser = "--no-browser" in sys.argv
     if already_running():
         print("すでに起動しています。ブラウザを開きます。")
@@ -330,10 +430,24 @@ def main():
             print("自動バックアップ:", b)
     except Exception as e:  # noqa
         print("自動バックアップに失敗:", e)
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    bind = HOST
+    if SHARE:
+        setup_password()
+        bind = "0.0.0.0"
+    try:
+        server = ThreadingHTTPServer((bind, PORT), Handler)
+    except OSError as e:
+        print("起動できませんでした（ポート", PORT, "が使用中の可能性）:", e)
+        return
     print("=" * 50)
-    print(" 実験ノート印刷ツール 起動中")
+    print(" 実験ノート印刷ツール 起動中" + ("（共有モード）" if SHARE else ""))
     print(" ブラウザで", url, "を開いています")
+    if SHARE:
+        print(" 他のPCからは、次のどれかのアドレスをブラウザで開いてください:")
+        for a in lan_addresses():
+            print("   ", a)
+        print(" 合言葉:", "あり" if PASSWORD else "なし")
+        print(" ※Windowsの「アクセスを許可しますか」が出たら「許可」を押してください")
     print(" 終了するときは、この画面を閉じてください")
     print("=" * 50)
     if not no_browser:

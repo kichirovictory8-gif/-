@@ -5,15 +5,30 @@
 // 共通
 // ============================================================
 const $app = document.getElementById('app');
+const NO_SERVER = 'ツールのサーバにつながりません。保存されていません。\n\n・起動.bat の黒い画面が開いているか確認してください（閉じると止まります）。\n・ZIPファイルは「すべて展開」してから起動.bat を開いてください。\n・他のPCから開いている場合は、ツールを起動しているPCが動いているか確認してください。\n\n入力した内容は画面に残っているので、サーバを起動し直してからもう一度保存してください。';
+async function req(method, u, body) {
+  let r;
+  try {
+    r = await fetch('/api/' + u, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  } catch (e) { alert(NO_SERVER); throw e; }
+  let j;
+  try { j = await r.json(); } catch (e) { alert('サーバから予期しない応答がありました（' + r.status + '）。保存されていない可能性があります。'); throw e; }
+  if (j && j.error) { alert('保存・読み込みに失敗しました: ' + j.error); throw new Error(j.error); }
+  return j;
+}
 const api = {
-  async get(u) { const r = await fetch('/api/' + u); return r.json(); },
-  async send(method, u, body) {
-    const r = await fetch('/api/' + u, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
-    const j = await r.json();
-    if (j && j.error) { alert('エラー: ' + j.error); throw new Error(j.error); }
-    return j;
-  },
+  get: u => req('GET', u),
+  send: (method, u, body) => req(method, u, body),
 };
+// 同時編集の確認つき保存（他の人が先に保存していたら知らせる）
+async function putWithCheck(u, data, base) {
+  let r = await api.send('PUT', u, { data, base });
+  if (r.conflict) {
+    if (!confirm('このデータは、開いた後に別の人（または別の画面）が保存しています。\n\nOK：自分の内容で上書きする（相手の変更は消えます）\nキャンセル：保存しない（ページを開き直すと相手の内容を確認できます）')) return null;
+    r = await api.send('PUT', u, { data, base, force: true });
+  }
+  return r.updated;
+}
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const clone = o => JSON.parse(JSON.stringify(o));
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
@@ -519,7 +534,12 @@ window.addEventListener('hashchange', router);
 function go(h) { location.hash = h; }
 
 async function viewHome() {
-  const [ps, rs] = await Promise.all([api.get('protocols'), api.get('records')]);
+  const [ps, rs, info] = await Promise.all([api.get('protocols'), api.get('records'), api.get('info')]);
+  const shareCard = info.share ? `<div class="card"><h3 style="margin-top:0">他のPCから開く（共有モードで起動中）</h3>
+      ${info.local ? `<p>同じ研究室のネットワークにつながったPCのブラウザで、次のどれかを開いてください（合言葉：${info.password ? 'あり。ユーザー名は空欄か何でもよく、パスワード欄に合言葉を入力' : 'なし'}）。</p>
+      <ul>${info.addresses.map(a => `<li><code>${esc(a)}</code></li>`).join('')}</ul>` : '<p>このPCは、ツールを起動しているPCに接続しています。</p>'}
+      <p><a class="btn" href="/shortcut.url" download>このPC用のアイコン（ショートカット）をダウンロード</a>
+      <span class="muted">ダウンロードした「実験ノート印刷.url」をデスクトップに移すと、ダブルクリックで開けます。</span></p></div>` : '';
   $app.innerHTML = `
     <h2>実験ノート印刷</h2>
     <div class="card"><h3 style="margin-top:0">新しい記録を書く</h3>
@@ -528,10 +548,11 @@ async function viewHome() {
       <p class="muted">プロトコルを選ぶと内容がそのまま入ります。黄色の欄（可変欄）だけ入力すれば印刷できます。</p></div>
     <div class="card"><div class="row"><h3 style="margin:0">最近の記録</h3><span class="spacer"></span><a href="#/records">すべて見る →</a></div>
       ${rs.length ? `<table class="list"><tr><th>実験日</th><th>プロトコル</th><th>印刷</th><th></th></tr>${rs.slice(0, 8).map(r => `<tr><td>${esc(r.exp_date)}</td><td>${esc(r.protocol_name)}</td><td class="muted">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td><td><a href="#/record/${r.id}">開く</a> ・ <a href="#/print/${r.id}">印刷</a></td></tr>`).join('')}</table>` : '<p class="muted">まだ記録はありません。</p>'}</div>
-    <div class="card"><div class="row"><h3 style="margin:0">バックアップ</h3><span class="spacer"></span><button id="bk">今すぐバックアップ</button></div>
-      <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>`;
+    ${shareCard}
+    ${info.local ? `<div class="card"><div class="row"><h3 style="margin:0">バックアップ</h3><span class="spacer"></span><button id="bk">今すぐバックアップ</button></div>
+      <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>` : ''}`;
   document.getElementById('start').onclick = () => go('#/new/' + document.getElementById('psel').value);
-  document.getElementById('bk').onclick = async () => { const r = await api.send('POST', 'backup'); toast('バックアップしました'); alert('バックアップを作成しました：\n' + r.path); };
+  if (info.local) document.getElementById('bk').onclick = async () => { const r = await api.send('POST', 'backup'); toast('バックアップしました'); alert('バックアップを作成しました：\n' + r.path); };
 }
 
 async function viewProtocols() {
@@ -553,7 +574,9 @@ async function viewProtocols() {
 
 async function viewProtocolEdit(id) {
   $app.onclick = null;
-  let doc = id === 'new' ? { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } } : (await api.get('protocols/' + id)).data;
+  let base = null, doc;
+  if (id === 'new') doc = { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } };
+  else { const pr = await api.get('protocols/' + id); doc = pr.data; base = pr.updated; }
   if (id === 'new') { doc.blocks[0].text = '材料'; }
   $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
       <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
@@ -569,7 +592,7 @@ async function viewProtocolEdit(id) {
   document.getElementById('save').onclick = async () => {
     if (!doc.name) doc.name = doc.title || '無題';
     if (id === 'new') { const r = await api.send('POST', 'protocols', { data: doc }); dirty = false; toast('保存しました'); go('#/protocol/' + r.id); }
-    else { await api.send('PUT', 'protocols/' + id, { data: doc }); dirty = false; toast('保存しました'); }
+    else { const u = await putWithCheck('protocols/' + id, doc, base); if (u) { base = u; dirty = false; toast('保存しました'); } }
   };
 }
 
@@ -581,13 +604,13 @@ async function viewNewRecord(pid) {
     doc: { title: pd.title, blocks: clone(pd.blocks), memo: clone(pd.memo || { text: '', print: false }) },
     opts: { chem: true, memo: !!(pd.memo && pd.memo.print), date: true, cut: true },
   };
-  recordEditor(rec, null);
+  recordEditor(rec, null, null);
 }
 async function viewRecord(id) {
   const r = await api.get('records/' + id);
-  recordEditor(r.data, +id);
+  recordEditor(r.data, +id, r.updated);
 }
-function recordEditor(rec, id) {
+function recordEditor(rec, id, base) {
   $app.onclick = null;
   let tab = 'fill';
   $app.innerHTML = `<div class="toolbar">
@@ -649,20 +672,21 @@ function recordEditor(rec, id) {
   optBind('o-date', 'date'); optBind('o-chem', 'chem'); optBind('o-memo', 'memo'); optBind('o-cut', 'cut');
   document.getElementById('date').onchange = e => { rec.exp_date = e.target.value; dirty = true; redraw(); };
   const save = async () => {
-    if (id) await api.send('PUT', 'records/' + id, { data: rec });
-    else { const r = await api.send('POST', 'records', { data: rec }); id = r.id; }
+    if (id) { const u = await putWithCheck('records/' + id, rec, base); if (!u) return null; base = u; }
+    else { const r = await api.send('POST', 'records', { data: rec }); id = r.id; base = (await api.get('records/' + id)).updated; }
     dirty = false;
     return id;
   };
   document.getElementById('save').onclick = async () => {
     const wasNew = !id;
-    await save(); toast('保存しました');
+    if (!(await save())) return;
+    toast('保存しました');
     if (wasNew) { currentHash = '#/record/' + id; history.replaceState(null, '', currentHash); document.querySelector('.toolbar .muted').textContent = `記録 No.${id}`; }
   };
   document.getElementById('toPrint').onclick = async () => {
     const n = countBlanks(doc);
     if (n && !confirm(`未入力の可変欄が ${n} 個あります。\n空欄のまま進むと、手書き用の灰色の空欄として印刷されます。進みますか？`)) return;
-    await save();
+    if (!(await save())) return;
     go('#/print/' + id);
   };
 }

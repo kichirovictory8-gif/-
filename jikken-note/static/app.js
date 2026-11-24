@@ -849,6 +849,7 @@ async function viewHome() {
       <span class="muted">ダウンロードした「実験ノート印刷.url」をデスクトップに移すと、ダブルクリックで開けます。</span></p></div>` : '';
   $app.innerHTML = `
     <h2>実験ノート印刷</h2>
+    ${info.warn ? `<div class="card" style="background:#fff4ce;border-color:#e0c060"><b>置き場所の注意：</b>${esc(info.warn)}<div class="muted">移すときはツールを終了してから jikken-note フォルダごと移動し、「デスクトップにアイコンを作る.bat」をもう一度実行してください。</div></div>` : ''}
     <div class="card"><h3 style="margin-top:0">新しい記録を書く</h3>
       <div class="row"><select id="psel" style="min-width:320px;font-size:16px;padding:8px">${ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
       <button class="primary big" id="start">このプロトコルで書く</button></div>

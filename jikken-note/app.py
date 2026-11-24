@@ -42,6 +42,18 @@ MIME = {
 }
 
 
+def location_warning():
+    """データが壊れやすい置き場所（クラウド同期・ダウンロード・ネットワーク上）なら注意文を返す"""
+    low = BASE.lower().replace("/", "\\")
+    if any(k in low for k in ("onedrive", "dropbox", "google drive", "googledrive", "icloud", "box sync")):
+        return "このツールはクラウド同期フォルダ（OneDrive など）の中にあります。同期の途中でデータが壊れることがあるので、同期されないフォルダ（例：C:\\jikken-note）に移すことをおすすめします。"
+    if "\\downloads\\" in low + "\\" or "\\ダウンロード\\" in low + "\\":
+        return "このツールは「ダウンロード」フォルダの中にあります。整理のときに消してしまわないよう、別のフォルダ（例：C:\\jikken-note）に移すことをおすすめします。"
+    if low.startswith("\\\\"):
+        return "このツールはネットワーク上のフォルダにあります。データが壊れることがあるので、自分のPCのフォルダに置いてください。"
+    return ""
+
+
 def app_version():
     """ツール本体のファイルの更新日時。変わったら開いている画面に「再読み込み」を出す"""
     latest = os.path.getmtime(os.path.abspath(__file__))
@@ -281,6 +293,7 @@ class Handler(BaseHTTPRequestHandler):
             if p[1] == "info":
                 return self.send_json({"db": DB_PATH, "backup_dir": BACKUP_DIR, "share": SHARE,
                                        "local": self.is_local(), "password": bool(PASSWORD), "version": app_version(),
+                                       "warn": location_warning() if self.is_local() else "",
                                        "addresses": lan_addresses() if SHARE else []})
             self.send_json({"error": "not found"}, 404)
         except Exception as e:  # noqa
@@ -459,6 +472,8 @@ def main():
     except OSError as e:
         print("起動できませんでした（ポート", PORT, "が使用中の可能性）:", e)
         return
+    if location_warning():
+        print("【注意】" + location_warning())
     print("=" * 50)
     print(" 実験ノート印刷ツール 起動中" + ("（共有モード）" if SHARE else ""))
     print(" ブラウザで", url, "を開いています")

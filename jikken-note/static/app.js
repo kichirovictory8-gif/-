@@ -1,0 +1,727 @@
+/* 実験ノート印刷ツール 画面プログラム */
+'use strict';
+
+// ============================================================
+// 共通
+// ============================================================
+const $app = document.getElementById('app');
+const api = {
+  async get(u) { const r = await fetch('/api/' + u); return r.json(); },
+  async send(method, u, body) {
+    const r = await fetch('/api/' + u, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json();
+    if (j && j.error) { alert('エラー: ' + j.error); throw new Error(j.error); }
+    return j;
+  },
+};
+const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const clone = o => JSON.parse(JSON.stringify(o));
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2200); }
+function jpDate(s) { if (!s) return ''; const [y, m, d] = s.split('-'); return `${y}年${+m}月${+d}日`; }
+function getPath(o, path) { return path.split('.').reduce((a, k) => (a == null ? a : a[k]), o); }
+function setPath(o, path, v) { const ks = path.split('.'); const last = ks.pop(); const t = ks.reduce((a, k) => a[k], o); t[last] = v; }
+function fmtNum(x) {
+  if (x === '' || x == null || isNaN(x)) return '';
+  const r = Math.round(x * 1000) / 1000;
+  return String(r);
+}
+function num(v) { if (v === '' || v == null) return NaN; return parseFloat(String(v).replace(/[，,]/g, '').replace(/[０-９．]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))); }
+
+let dirty = false;
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+function leaveOk() { if (!dirty) return true; if (confirm('保存していない変更があります。破棄して移動しますか？')) { dirty = false; return true; } return false; }
+
+// ============================================================
+// 文字の書式（可変欄・強調・上付き/下付きの自動変換）
+// ============================================================
+const TOKEN_RE = /\[\[([^\]]*)\]\]/g;
+function parseToken(inner) {
+  const i = inner.indexOf('=');
+  if (i < 0) return { label: inner.trim(), value: '' };
+  return { label: inner.slice(0, i).trim(), value: inner.slice(i + 1) };
+}
+function setToken(str, k, value) {
+  let n = -1;
+  return str.replace(TOKEN_RE, (m, inner) => {
+    n++;
+    if (n !== k) return m;
+    const t = parseToken(inner);
+    return value === '' ? `[[${t.label}]]` : `[[${t.label}=${value}]]`;
+  });
+}
+function countBlanks(doc) {
+  let c = 0;
+  const walk = v => {
+    if (typeof v === 'string') { for (const m of v.matchAll(TOKEN_RE)) if (parseToken(m[1]).value === '') c++; }
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') for (const k in v) { if (k !== 'src') walk(v[k]); }
+  };
+  walk(doc.blocks); walk(doc.title);
+  for (const b of doc.blocks) if (b.type === 'materials' && (b.n === '' || b.n == null)) c++;
+  return c;
+}
+
+const ELEMENTS = new Set('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu'.split(' '));
+const CHEM_OK = new Set(['H2O', 'H2O2', 'CO2', 'O2', 'N2', 'H2', 'H2SO4', 'H3PO4', 'HNO3', 'KH2PO4', 'K2HPO4', 'K3PO4', '(NH4)2SO4', 'NH4HCO3', 'NH4', 'SO4', 'PO4', 'K2CO3', 'KIO3', 'HIO4', 'B2O3', 'P2O5']);
+function isFormula(tok) {
+  if (!/\d/.test(tok)) return false;
+  if (CHEM_OK.has(tok)) return true;
+  const body = tok.replace(/[()]/g, '');
+  const parts = body.match(/[A-Z][a-z]?\d*/g);
+  if (!parts || parts.join('') !== body || parts.length < 2) return false;
+  let two = false;
+  for (const p of parts) { const el = p.replace(/\d+/g, ''); if (!ELEMENTS.has(el)) return false; if (el.length === 2) two = true; }
+  if (/^\d/.test(tok)) return false;
+  return two;
+}
+function autoScript(text, chem) {
+  // 1) タンパク質名の直後の残基範囲 → 上付き  例: Orc2(1-236)
+  text = text.replace(/([A-Z][A-Za-z0-9Δ]*[A-Za-z0-9Δ])\((\d+\s*[-–−~～]\s*\d+)\)/g, '$1<sup>$2</sup>');
+  // 2) タグの個数 → 下付き  例: His12, His6, FLAG3
+  text = text.replace(/(^|[^A-Za-z])(His|HIS|FLAG|Flag|Myc|myc|HA|Strep)(\d{1,2})(?![\d])/g, '$1$2<sub>$3</sub>');
+  // 3) 化学式の数字 → 下付き  例: MgCl2, (NH4)2SO4
+  if (chem) {
+    text = text.replace(/(^|[^A-Za-z0-9])(\(?[A-Z][A-Za-z0-9()]*\d[A-Za-z0-9()]*)(?![A-Za-z0-9])/g, (m, pre, tok) => {
+      if (!isFormula(tok)) return m;
+      return pre + tok.replace(/([A-Za-z)])(\d+)/g, '$1<sub>$2</sub>');
+    });
+  }
+  return text;
+}
+function markup(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/==(.+?)==/g, '<mark class="hl">$1</mark>')
+    .replace(/!!(.+?)!!/g, '<span class="red">$1</span>')
+    .replace(/__(.+?)__/g, '<u>$1</u>')
+    .replace(/\|\|(.+?)\|\|/g, '<span class="box">$1</span>')
+    .replace(/\^\{(.+?)\}/g, '<sup>$1</sup>')
+    .replace(/_\{(.+?)\}/g, '<sub>$1</sub>');
+}
+function inlineFmt(raw, ctx) {
+  // ctx: {mode:'print'|'preview'|'fill', path, chem}
+  const toks = [];
+  let s = String(raw ?? '').replace(TOKEN_RE, (m, inner) => { toks.push(parseToken(inner)); return '' + (toks.length - 1) + ''; });
+  s = markup(esc(s));
+  s = s.split(/(<[^>]+>)/).map(part => part.startsWith('<') ? part : autoScript(part, ctx.chem)).join('');
+  return s.replace(/(\d+)/g, (m, i) => tokenHtml(toks[+i], +i, ctx));
+}
+function tokenHtml(t, k, ctx) {
+  if (ctx.mode === 'fill' && ctx.path != null) {
+    const v = t.value;
+    const w = Math.max(3, Math.min(30, (v || t.label || '').length * 0.75 + 1.5));
+    return `<input class="vin${v ? '' : ' empty'}" data-path="${esc(ctx.path)}" data-k="${k}" data-key="${esc(ctx.path)}#${k}" value="${esc(v)}" placeholder="${esc(t.label)}" title="${esc(t.label || '可変欄')}" style="width:${w}em">`;
+  }
+  if (t.value !== '') return `<span class="vf">${autoScript(markup(esc(t.value)), ctx.chem)}</span>`;
+  const w = Math.max(3, Math.min(20, t.label.length * 1.0 + 1));
+  const lbl = ctx.mode === 'preview' && t.label ? `<span class="lbl">${esc(t.label)}</span>` : '&nbsp;';
+  return `<span class="vf blank" style="min-width:${w}em">${lbl}</span>`;
+}
+
+// ============================================================
+// 書面の描画（印刷・プレビュー・入力モード共通）
+// ============================================================
+const HANG = /^[・※★→⇒〇●◎①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/;
+function splitIndent(line) {
+  const m = line.match(/^[ 　\t]*/)[0];
+  let ind = 0;
+  for (const ch of m) ind += ch === '　' ? 1 : ch === '\t' ? 2 : 0.5;
+  return { ind, text: line.slice(m.length) };
+}
+function lineHtml(text, ind, ctx, extraCls = '') {
+  if (text === '') return '<div class="gap"></div>';
+  if (/^[↓⇓]$/.test(text.trim())) return `<div class="arrow" style="padding-left:${ind}em">↓</div>`;
+  const hang = HANG.test(text);
+  return `<div class="ln${hang ? ' hang' : ''} ${extraCls}" style="padding-left:${ind + (hang ? 1 : 0)}em">${inlineFmt(text, ctx)}</div>`;
+}
+function renderText(str, ctx) {
+  return String(str || '').split('\n').map(l => { const { ind, text } = splitIndent(l); return lineHtml(text, ind, ctx); }).join('');
+}
+function renderSteps(str, ctx) {
+  // 1行1ステップ。字下げした行・※で始まる行は補足。ステップの間に「↓」を自動で入れる。空行で区切ると矢印なし。
+  const lines = String(str || '').split('\n');
+  let out = '', grp = '', prevStep = false, stepInd = 0;
+  const flush = () => { if (grp) out += `<div class="stepgrp">${grp}</div>`; grp = ''; };
+  for (const raw of lines) {
+    const { ind, text } = splitIndent(raw);
+    if (text === '') { flush(); out += '<div class="gap"></div>'; prevStep = false; continue; }
+    if (/^[↓⇓]$/.test(text.trim())) continue;
+    const isStep = ind === 0 && !/^[※＊*]/.test(text);
+    if (isStep) {
+      flush();
+      if (prevStep) out += `<div class="arrow" style="padding-left:${stepInd}em">↓</div>`;
+      prevStep = true; stepInd = 0;
+    }
+    grp += lineHtml(text, ind, ctx);
+  }
+  flush();
+  return out;
+}
+function matCompute(b) {
+  const n = num(b.n);
+  const vol = b.mode === 'volume';
+  const factor = isNaN(n) ? NaN : (vol ? n / 1000 : n);
+  const total = num(b.total);
+  let sumCalc = 0;
+  for (const r of b.rows) if ((r.kind || 'calc') === 'calc' && !isNaN(num(r.per1))) sumCalc += num(r.per1);
+  const restPer1 = isNaN(total) ? NaN : Math.round((total - sumCalc) * 1000) / 1000;
+  return { n, factor, total, restPer1, vol };
+}
+function renderMaterials(b, bp, ctx) {
+  const c = matCompute(b);
+  const nHtml = ctx.mode === 'fill'
+    ? `<input class="vin${b.n === '' || b.n == null ? ' empty' : ''}" data-num="1" data-path="${bp}.n" data-key="${bp}.n" value="${esc(b.n ?? '')}" placeholder="${c.vol ? '量' : '数'}" style="width:4em">`
+    : (b.n !== '' && b.n != null ? `<span class="vf">${esc(b.n)}</span>` : `<span class="vf blank" style="min-width:3em">&nbsp;</span>`);
+  const label = inlineFmt(b.label || '', { ...ctx, path: `${bp}.label` });
+  const head = c.vol
+    ? `${label}（作製量：${nHtml} mL）`
+    : `${label}（×${nHtml}${esc(b.nunit || 'サンプル')}分）`;
+  const amt = (per1, unit) => {
+    if (isNaN(per1)) return `<span class="vf blank">&nbsp;</span>${esc(unit)}`;
+    if (isNaN(c.factor)) return `<span class="vf blank" style="min-width:3em">&nbsp;</span>${esc(unit)}`;
+    return `<span class="vf calc">${fmtNum(per1 * c.factor)}</span>${esc(unit)}`;
+  };
+  let rows = '';
+  b.rows.forEach((r, i) => {
+    const kind = r.kind || 'calc';
+    const rp = `${bp}.rows.${i}`;
+    let a = '', ref = '';
+    const unitRef = r.unit + (c.vol ? '/L' : '');
+    if (kind === 'calc') { a = amt(num(r.per1), r.unit); ref = isNaN(num(r.per1)) ? '' : fmtNum(num(r.per1)) + unitRef; }
+    else if (kind === 'rest') { a = amt(c.restPer1, r.unit); ref = isNaN(c.restPer1) ? '残り' : fmtNum(c.restPer1) + unitRef; }
+    else if (kind === 'vol') { a = isNaN(c.n) ? `<span class="vf blank" style="min-width:3em">&nbsp;</span>${esc(r.unit)}` : `<span class="vf calc">${fmtNum(c.n)}</span>${esc(r.unit)}`; }
+    else { a = inlineFmt(r.value || '', { ...ctx, path: `${rp}.value` }) + esc(r.unit || ''); }
+    const refHtml = (kind === 'text' || kind === 'vol') ? (r.ref ? inlineFmt(r.ref, { ...ctx, path: `${rp}.ref` }) : '') : (ref ? `（${esc(ref)}）` : '');
+    const bullet = r.nobullet ? '' : '・';
+    rows += `<tr><td class="nm" style="padding-left:${1 + (+r.indent || 0)}em">${bullet}${inlineFmt(r.name, { ...ctx, path: `${rp}.name` })}</td><td>：</td><td class="amt">${a}</td><td>${refHtml}</td><td class="note">${inlineFmt(r.note || '', { ...ctx, path: `${rp}.note` })}</td></tr>`;
+  });
+  if (b.total !== '' && b.total != null) {
+    rows += `<tr class="total"><td class="nm">　${esc(b.total_label || 'Total')}</td><td>：</td><td class="amt">${amt(c.total, b.total_unit || '')}</td><td>（${fmtNum(c.total)}${esc(b.total_unit || '')}${c.vol ? '/L' : ''}）</td><td></td></tr>`;
+  }
+  return `<div class="mat"><div class="mat-h"><span>${head}</span><span class="r">${c.vol ? '' : '（×１量）'}</span></div><table class="mat-t">${rows}</table></div>`;
+}
+function renderTable(b, bp, ctx) {
+  let h = `<table class="grid${b.full ? ' full' : ''}">`;
+  b.rows.forEach((row, r) => {
+    const hr = b.header_row && r === 0;
+    h += `<tr class="${hr ? 'hr' : ''}">`;
+    row.forEach((cell, ci) => {
+      const hc = b.header_col && ci === 0;
+      h += `<td class="${hc ? 'hc lft' : ''}">${inlineFmt(cell, { ...ctx, path: `${bp}.rows.${r}.${ci}` })}</td>`;
+    });
+    h += '</tr>';
+  });
+  return h + '</table>';
+}
+function renderPcr(b, bp, ctx) {
+  const st = b.steps || [];
+  const from = +b.cyc_from, to = +b.cyc_to;
+  const hasCyc = b.cyc_from !== '' && b.cyc_to !== '' && !isNaN(from) && !isNaN(to) && from <= to && to < st.length;
+  const step = (s, i) => `<div class="ps">${inlineFmt(s.t, { ...ctx, path: `${bp}.steps.${i}.t` })}、${inlineFmt(s.d, { ...ctx, path: `${bp}.steps.${i}.d` })}</div>`;
+  const arrow = '<div class="arrow">↓</div>';
+  let h = `<div class="pcr">`;
+  if (b.label) h += `<div class="ps"><span class="box">${inlineFmt(b.label, { ...ctx, path: `${bp}.label` })}</span></div>`;
+  let i = 0, first = true;
+  while (i < st.length) {
+    if (!first) h += arrow;
+    first = false;
+    if (hasCyc && i === from) {
+      let inner = '';
+      for (let j = from; j <= to; j++) { if (j > from) inner += arrow; inner += step(st[j], j); }
+      h += `<div class="cyc-wrap"><div class="cyc-steps">${inner}</div><div class="brk"></div><div class="cyc-lbl">${inlineFmt(b.cyc_text || '', { ...ctx, path: `${bp}.cyc_text` })}</div></div>`;
+      i = to + 1;
+    } else { h += step(st[i], i); i++; }
+  }
+  return h + '</div>';
+}
+function renderHeading(b, bp, ctx) {
+  const t = inlineFmt(b.text || '', { ...ctx, path: `${bp}.text` });
+  const ex = b.extra ? `<span class="extra">${inlineFmt(b.extra, { ...ctx, path: `${bp}.extra` })}</span>` : '';
+  const ind = `padding-left:${+b.indent || 0}em`;
+  switch (b.style) {
+    case '●': return `<div class="h-sub" style="${ind}">●<u>${t}</u>${ex}</div>`;
+    case '【】': return `<div class="blk-h" style="${ind}">【${t}】${ex}</div>`;
+    case '〈〉': return `<div class="blk-h" style="${ind}">〈${t}〉${ex}</div>`;
+    case '[]': return `<div class="blk-h" style="${ind}">[${t}]${ex}</div>`;
+    case '〇': return `<div class="blk-h" style="${ind}">〇${t}${ex}</div>`;
+    case '★': return `<div class="blk-h" style="${ind}">★${t}${ex}</div>`;
+    default: return `<div class="blk-h" style="${ind}">${t}${ex}</div>`;
+  }
+}
+function renderDoc(doc, opts = {}) {
+  const mode = opts.mode || 'print';
+  const ctx = { mode, chem: opts.chem !== false };
+  let h = `<div class="sheet">`;
+  if (opts.date) h += `<div class="date-line">${esc(jpDate(opts.date))}</div>`;
+  h += `<h1 class="ptitle">●<u>${inlineFmt(doc.title || '', { ...ctx, path: 'title' })}</u></h1>`;
+  (doc.blocks || []).forEach((b, i) => {
+    const bp = `blocks.${i}`;
+    const ind = +b.indent || 0;
+    let inner = '';
+    switch (b.type) {
+      case 'heading': inner = renderHeading(b, bp, ctx); break;
+      case 'text': inner = renderText(b.text, { ...ctx, path: `${bp}.text` }); break;
+      case 'steps': inner = renderSteps(b.text, { ...ctx, path: `${bp}.text` }); break;
+      case 'materials': inner = renderMaterials(b, bp, ctx); break;
+      case 'table': inner = renderTable(b, bp, ctx); break;
+      case 'pcr': inner = renderPcr(b, bp, ctx); break;
+      case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${+b.width || 100}%">` : ''; break;
+    }
+    h += `<div class="block" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${inner}</div>`;
+  });
+  if (opts.memo && doc.memo && doc.memo.text && doc.memo.text.trim()) {
+    h += `<div class="memo"><div class="memo-h">【メモ】</div>${renderText(doc.memo.text, { ...ctx, mode: mode === 'fill' ? 'print' : mode, path: 'memo.text' })}</div>`;
+  }
+  return h + '</div>';
+}
+
+// ============================================================
+// 体言止めの提案（任意）
+// ============================================================
+const TG_RULES = [
+  [/をしっかり除く$/, 'をしっかり除去'], [/を除く$/, 'を除去'], [/除く$/, '除去'],
+  [/を捨てる$/, 'を廃棄'], [/捨てる$/, '廃棄'],
+  [/を加える$/, 'を添加'], [/加える$/, '添加'], [/を入れる$/, 'を添加'], [/入れる$/, '添加'],
+  [/を混ぜる$/, 'を混合'], [/混ぜる$/, '混合'],
+  [/に移す$/, 'に移し替え'], [/を移す$/, 'を移動'],
+  [/溶かす$/, '溶解'], [/冷やす$/, '冷却'], [/温める$/, '加温'],
+  [/置く$/, '静置'], [/洗う$/, '洗浄'], [/塗り広げる$/, '塗布'], [/まく$/, '播種'],
+  [/集める$/, '回収'], [/まとめる$/, '集約'], [/取る$/, '採取'], [/出す$/, '取り出し'],
+  [/行う$/, '実施'], [/保存する$/, '保存'], [/繰り返す$/, '反復'], [/待つ$/, '待機'],
+  [/([^\sのをにでがはと])する$/, '$1'],
+];
+function taigen(line) {
+  const m = line.match(/^(.*?)(。?)((?:[（(][^（）()]*[）)])*)(。?)$/);
+  if (!m) return line;
+  let main = m[1];
+  for (const [re, rep] of TG_RULES) { if (re.test(main)) { main = main.replace(re, rep); break; } }
+  return main + m[3];
+}
+function openTaigen(text, onApply) {
+  const lines = text.split('\n');
+  const cands = lines.map((l, i) => ({ i, old: l, neu: taigen(l) })).filter(c => c.neu !== c.old.replace(/。$/, '') || /。$/.test(c.old.trim()) && c.neu !== c.old);
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal"><h3>体言止めの提案</h3>
+    <p class="muted">文末を体言止めにそろえる案です。使いたい行にチェックを入れて「反映」を押してください（あくまで機械的な提案なので、必ず目で確認してください）。</p>
+    ${cands.length ? cands.map(c => `<label class="tg-line"><input type="checkbox" data-i="${c.i}" checked><span>${esc(c.old)}</span><span class="new">${esc(c.neu)}</span></label>`).join('') : '<p>提案はありません。</p>'}
+    <div class="row" style="margin-top:12px"><span class="spacer"></span><button data-x>閉じる</button>${cands.length ? '<button class="primary" data-ok>反映</button>' : ''}</div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('[data-x]').onclick = () => bg.remove();
+  const ok = bg.querySelector('[data-ok]');
+  if (ok) ok.onclick = () => {
+    bg.querySelectorAll('input[data-i]:checked').forEach(cb => { const c = cands.find(x => x.i === +cb.dataset.i); lines[c.i] = c.neu; });
+    bg.remove(); onApply(lines.join('\n'));
+  };
+}
+
+// ============================================================
+// ブロック編集画面（プロトコル編集・記録の「全体を編集」で共用）
+// ============================================================
+const BLOCK_TYPES = {
+  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像',
+};
+function newBlock(type) {
+  switch (type) {
+    case 'heading': return { type, style: '【】', text: '', extra: '' };
+    case 'steps': return { type, text: '' };
+    case 'text': return { type, text: '' };
+    case 'materials': return { type, label: '〇', mode: 'sample', nunit: 'サンプル', n: '', total: '', total_unit: 'uL', rows: [{ name: '', kind: 'calc', per1: '', unit: 'uL', note: '' }] };
+    case 'table': return { type, header_row: true, header_col: true, rows: [['', '', ''], ['', '', ''], ['', '', '']] };
+    case 'pcr': return { type, label: 'PCR', steps: [{ t: '98℃', d: '30sec' }, { t: '98℃', d: '10sec' }, { t: '[[アニール温度]]℃', d: '5sec' }, { t: '72℃', d: '[[伸長時間]]' }, { t: '4℃', d: '∞' }], cyc_from: 1, cyc_to: 3, cyc_text: '×[[サイクル数=30]]サイクル' };
+    case 'image': return { type, src: '', width: 100 };
+  }
+}
+let lastField = null;
+document.addEventListener('focusin', e => { if (e.target.matches('.blk textarea, .blk input[type=text], .meta input[type=text], .meta textarea')) lastField = e.target; });
+function wrapSel(before, after, placeholder) {
+  const el = lastField;
+  if (!el) { alert('先に、書式を付けたい欄をクリックしてください。'); return; }
+  const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? el.value.length;
+  const sel = el.value.slice(s, e) || placeholder;
+  el.value = el.value.slice(0, s) + before + sel + after + el.value.slice(e);
+  el.focus();
+  el.selectionStart = s + before.length; el.selectionEnd = s + before.length + sel.length;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+function markupBar() {
+  return `<div class="mk"><span class="muted">選んだ文字に書式：</span>
+    <button type="button" data-mk="var" title="毎回変わる欄。[[ラベル]] または [[ラベル=既定値]]">可変欄 [[ ]]</button>
+    <button type="button" data-mk="b"><b>太字</b></button>
+    <button type="button" data-mk="hl" style="background:#fff200">強調(黄)</button>
+    <button type="button" data-mk="red" style="color:#e00000">注意(赤)</button>
+    <button type="button" data-mk="u"><u>下線</u></button>
+    <button type="button" data-mk="box">枠囲み</button>
+    <button type="button" data-mk="sup">上付き x<sup>2</sup></button>
+    <button type="button" data-mk="sub">下付き x<sub>2</sub></button></div>`;
+}
+function bindMarkupBar(root) {
+  root.querySelectorAll('[data-mk]').forEach(btn => btn.onmousedown = e => {
+    e.preventDefault();
+    const k = btn.dataset.mk;
+    const m = { var: ['[[', ']]', 'ラベル'], b: ['**', '**', '文字'], hl: ['==', '==', '文字'], red: ['!!', '!!', '文字'], u: ['__', '__', '文字'], box: ['||', '||', '文字'], sup: ['^{', '}', '上'], sub: ['_{', '}', '下'] }[k];
+    wrapSel(...m);
+  });
+}
+function ta(bind, val, rows) {
+  const n = Math.max(rows || 3, String(val || '').split('\n').length + 1);
+  return `<textarea data-bind="${bind}" rows="${Math.min(n, 30)}">${esc(val || '')}</textarea>`;
+}
+const inp = (bind, val, ph = '', w = '') => `<input type="text" data-bind="${bind}" value="${esc(val ?? '')}" placeholder="${esc(ph)}" ${w ? `style="width:${w}"` : ''}>`;
+function blockEditorHtml(b, i, n) {
+  const bp = `blocks.${i}`;
+  let body = '';
+  switch (b.type) {
+    case 'heading':
+      body = `<div class="row"><select data-bind="${bp}.style">${['【】', '〈〉', '[]', '〇', '★', '●', 'なし'].map(s => `<option ${b.style === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+        ${inp(bp + '.text', b.text, '見出しの文字', '220px')} 続けて：${inp(bp + '.extra', b.extra, '（任意）見出しの後ろに続く普通の文字', '300px')}
+        字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
+      break;
+    case 'steps':
+      body = `<div class="muted">1行に1ステップ。ステップの間には「↓」が自動で入ります。行頭を全角スペースで字下げした行と「※」で始まる行は補足になります。空行で区切ると矢印は入りません。</div>${ta(bp + '.text', b.text, 6)}
+        <div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
+      break;
+    case 'text':
+      body = `${ta(bp + '.text', b.text, 4)}<div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
+      break;
+    case 'materials': {
+      body = `<div class="row">見出し ${inp(bp + '.label', b.label, '〇PCR pre-mix まとめ作り', '260px')}
+        計算 <select data-bind="${bp}.mode"><option value="sample" ${b.mode !== 'volume' ? 'selected' : ''}>サンプル数 × 1量</option><option value="volume" ${b.mode === 'volume' ? 'selected' : ''}>作製量(mL) × 濃度(/L)</option></select>
+        ${b.mode === 'volume' ? '' : `数え方 ${inp(bp + '.nunit', b.nunit, 'サンプル', '70px')}`}
+        既定の数 ${inp(bp + '.n', b.n, '空欄＝毎回入力', '90px')}
+        合計(1量) ${inp(bp + '.total', b.total, '例 10', '60px')} ${inp(bp + '.total_unit', b.total_unit, 'uL', '40px')}
+        字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>
+        <table class="ed"><tr><th>試薬名</th><th>種類</th><th>${b.mode === 'volume' ? '濃度(/L)' : '1量'}</th><th>単位</th><th>固定の量・( )内の文字</th><th>備考（右側）</th><th>字下げ</th><th></th></tr>
+        ${b.rows.map((r, j) => {
+          const rp = `${bp}.rows.${j}`;
+          return `<tr><td>${inp(rp + '.name', r.name)}</td>
+          <td><select data-bind="${rp}.kind">${[['calc', '計算'], ['rest', '残り(合計−他)'], ['text', '固定・空欄'], ['vol', '作製量そのもの']].map(([v, l]) => `<option value="${v}" ${(r.kind || 'calc') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+          <td>${inp(rp + '.per1', r.per1, '', '60px')}</td><td>${inp(rp + '.unit', r.unit, '', '44px')}</td>
+          <td>${(r.kind === 'text') ? inp(rp + '.value', r.value, '[[ ]] で空欄') : ''}${(r.kind === 'text' || r.kind === 'vol') ? inp(rp + '.ref', r.ref, '（例）目安：…') : ''}</td>
+          <td>${inp(rp + '.note', r.note)}</td><td>${inp(rp + '.indent', r.indent, '', '32px')}</td>
+          <td style="white-space:nowrap"><button type="button" class="small" data-act="rowup" data-path="${bp}.rows" data-j="${j}">↑</button><button type="button" class="small" data-act="rowdel" data-path="${bp}.rows" data-j="${j}">×</button></td></tr>`;
+        }).join('')}</table>
+        <button type="button" class="small" data-act="rowadd" data-path="${bp}.rows">＋ 試薬を追加</button>`;
+      break;
+    }
+    case 'table':
+      body = `<div class="row"><label><input type="checkbox" data-bind="${bp}.header_row" ${b.header_row ? 'checked' : ''}> 1行目を見出し(太字)</label>
+        <label><input type="checkbox" data-bind="${bp}.header_col" ${b.header_col ? 'checked' : ''}> 1列目を見出し(太字)</label>
+        <label><input type="checkbox" data-bind="${bp}.full" ${b.full ? 'checked' : ''}> 横幅いっぱい</label>
+        <button type="button" class="small" data-act="tr+" data-i="${i}">＋行</button><button type="button" class="small" data-act="tr-" data-i="${i}">−行</button>
+        <button type="button" class="small" data-act="tc+" data-i="${i}">＋列</button><button type="button" class="small" data-act="tc-" data-i="${i}">−列</button>
+        字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>
+        <table class="ed grid-ed">${b.rows.map((row, r) => `<tr>${row.map((c, ci) => `<td>${inp(`${bp}.rows.${r}.${ci}`, c)}</td>`).join('')}</tr>`).join('')}</table>`;
+      break;
+    case 'pcr':
+      body = `<div class="row">枠の文字 ${inp(bp + '.label', b.label, 'PCR', '80px')}
+        くり返し：<select data-bind="${bp}.cyc_from" data-num="1"><option value="">なし</option>${b.steps.map((s, j) => `<option value="${j}" ${+b.cyc_from === j && b.cyc_from !== '' ? 'selected' : ''}>${j + 1}行目</option>`).join('')}</select>
+        〜 <select data-bind="${bp}.cyc_to" data-num="1"><option value="">なし</option>${b.steps.map((s, j) => `<option value="${j}" ${+b.cyc_to === j && b.cyc_to !== '' ? 'selected' : ''}>${j + 1}行目</option>`).join('')}</select>
+        表示 ${inp(bp + '.cyc_text', b.cyc_text, '×30サイクル', '200px')}</div>
+        <table class="ed"><tr><th></th><th>温度</th><th>時間</th><th></th></tr>${b.steps.map((s, j) => `<tr><td>${j + 1}</td><td>${inp(`${bp}.steps.${j}.t`, s.t)}</td><td>${inp(`${bp}.steps.${j}.d`, s.d)}</td>
+        <td><button type="button" class="small" data-act="rowup" data-path="${bp}.steps" data-j="${j}">↑</button><button type="button" class="small" data-act="rowdel" data-path="${bp}.steps" data-j="${j}">×</button></td></tr>`).join('')}</table>
+        <button type="button" class="small" data-act="pcradd" data-path="${bp}.steps">＋ 段階を追加</button>`;
+      break;
+    case 'image':
+      body = `<div class="row"><input type="file" accept="image/*" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
+        ${b.src ? '<span class="muted">画像あり</span>' : '<span class="muted">画像なし</span>'}</div>`;
+      break;
+  }
+  return `<div class="blk"><div class="blk-head"><span class="type">${BLOCK_TYPES[b.type]}</span><span class="spacer"></span>
+    <button type="button" class="small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+    <button type="button" class="small" data-act="down" data-i="${i}" ${i === n - 1 ? 'disabled' : ''}>↓</button>
+    <button type="button" class="small" data-act="dup" data-i="${i}">複製</button>
+    <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${body}
+    <div class="addbar" style="margin:6px 0 0"><span class="muted">この下に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="${i + 1}">${v}</button>`).join('')}</div></div>`;
+}
+function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
+  const render = () => {
+    el.innerHTML = `
+      ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}</div></div>` : ''}
+      <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div></div>
+      <div class="card">${markupBar()}
+        <div class="addbar"><span class="muted">先頭に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="0">${v}</button>`).join('')}</div>
+        ${doc.blocks.map((b, i) => blockEditorHtml(b, i, doc.blocks.length)).join('')}
+      </div>
+      <div class="card meta"><h3 style="margin-top:0">メモ（解説・注意点など）</h3>
+        <div class="muted">印刷するかどうかは記録の画面で選べます。</div>
+        ${ta('memo.text', (doc.memo || {}).text, 4)}
+        <label><input type="checkbox" data-bind="memo.print" ${(doc.memo || {}).print ? 'checked' : ''}> 最初から「メモも印刷」にしておく</label></div>`;
+    bindMarkupBar(el);
+  };
+  if (!doc.memo) doc.memo = { text: '', print: false };
+  render();
+  el.oninput = el.onchange = e => {
+    const t = e.target;
+    if (!t.dataset.bind) return;
+    let v = t.type === 'checkbox' ? t.checked : t.value;
+    if (t.dataset.num && v !== '') v = +v;
+    setPath(doc, t.dataset.bind, v);
+    if (e.type === 'change' && (t.tagName === 'SELECT')) render();
+    onChange();
+  };
+  el.onclick = e => {
+    const t = e.target.closest('[data-act]');
+    if (!t || t.type === 'file') return;
+    const a = t.dataset.act, i = +t.dataset.i;
+    const B = doc.blocks;
+    if (a === 'add') B.splice(+t.dataset.at, 0, newBlock(t.dataset.type));
+    else if (a === 'up' && i > 0) [B[i - 1], B[i]] = [B[i], B[i - 1]];
+    else if (a === 'down' && i < B.length - 1) [B[i + 1], B[i]] = [B[i], B[i + 1]];
+    else if (a === 'dup') B.splice(i + 1, 0, clone(B[i]));
+    else if (a === 'del') { if (!confirm('このブロックを削除しますか？')) return; B.splice(i, 1); }
+    else if (a === 'rowadd') getPath(doc, t.dataset.path).push({ name: '', kind: 'calc', per1: '', unit: 'uL', note: '' });
+    else if (a === 'pcradd') getPath(doc, t.dataset.path).push({ t: '', d: '' });
+    else if (a === 'rowdel') getPath(doc, t.dataset.path).splice(+t.dataset.j, 1);
+    else if (a === 'rowup') { const arr = getPath(doc, t.dataset.path), j = +t.dataset.j; if (j > 0) [arr[j - 1], arr[j]] = [arr[j], arr[j - 1]]; }
+    else if (a === 'tr+') B[i].rows.push(B[i].rows[0].map(() => ''));
+    else if (a === 'tr-') { if (B[i].rows.length > 1) B[i].rows.pop(); }
+    else if (a === 'tc+') B[i].rows.forEach(r => r.push(''));
+    else if (a === 'tc-') { if (B[i].rows[0].length > 1) B[i].rows.forEach(r => r.pop()); }
+    else if (a === 'taigen') { openTaigen(B[i].text || '', v => { B[i].text = v; render(); onChange(); }); return; }
+    else return;
+    render(); onChange();
+  };
+  el.addEventListener('change', e => {
+    const t = e.target;
+    if (t.dataset.act !== 'img' || !t.files[0]) return;
+    const fr = new FileReader();
+    fr.onload = () => { doc.blocks[+t.dataset.i].src = fr.result; render(); onChange(); };
+    fr.readAsDataURL(t.files[0]);
+  });
+}
+
+// ============================================================
+// 各画面
+// ============================================================
+const routes = [
+  [/^#?\/?$/, viewHome],
+  [/^#\/protocols$/, viewProtocols],
+  [/^#\/protocol\/(new|\d+)$/, viewProtocolEdit],
+  [/^#\/new\/(\d+)$/, viewNewRecord],
+  [/^#\/record\/(\d+)$/, viewRecord],
+  [/^#\/records$/, viewRecords],
+  [/^#\/print\/(\d+)$/, viewPrint],
+  [/^#\/help$/, viewHelp],
+];
+let currentHash = location.hash;
+async function router() {
+  if (location.hash !== currentHash && !leaveOk()) { history.replaceState(null, '', currentHash); return; }
+  currentHash = location.hash;
+  document.body.classList.toggle('printmode', location.hash.startsWith('#/print/'));
+  window.scrollTo(0, 0);
+  for (const [re, fn] of routes) { const m = location.hash.match(re); if (m) return fn(...m.slice(1)); }
+  viewHome();
+}
+window.addEventListener('hashchange', router);
+function go(h) { location.hash = h; }
+
+async function viewHome() {
+  const [ps, rs] = await Promise.all([api.get('protocols'), api.get('records')]);
+  $app.innerHTML = `
+    <h2>実験ノート印刷</h2>
+    <div class="card"><h3 style="margin-top:0">新しい記録を書く</h3>
+      <div class="row"><select id="psel" style="min-width:320px;font-size:16px;padding:8px">${ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <button class="primary big" id="start">このプロトコルで書く</button></div>
+      <p class="muted">プロトコルを選ぶと内容がそのまま入ります。黄色の欄（可変欄）だけ入力すれば印刷できます。</p></div>
+    <div class="card"><div class="row"><h3 style="margin:0">最近の記録</h3><span class="spacer"></span><a href="#/records">すべて見る →</a></div>
+      ${rs.length ? `<table class="list"><tr><th>実験日</th><th>プロトコル</th><th>印刷</th><th></th></tr>${rs.slice(0, 8).map(r => `<tr><td>${esc(r.exp_date)}</td><td>${esc(r.protocol_name)}</td><td class="muted">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td><td><a href="#/record/${r.id}">開く</a> ・ <a href="#/print/${r.id}">印刷</a></td></tr>`).join('')}</table>` : '<p class="muted">まだ記録はありません。</p>'}</div>
+    <div class="card"><div class="row"><h3 style="margin:0">バックアップ</h3><span class="spacer"></span><button id="bk">今すぐバックアップ</button></div>
+      <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>`;
+  document.getElementById('start').onclick = () => go('#/new/' + document.getElementById('psel').value);
+  document.getElementById('bk').onclick = async () => { const r = await api.send('POST', 'backup'); toast('バックアップしました'); alert('バックアップを作成しました：\n' + r.path); };
+}
+
+async function viewProtocols() {
+  const ps = await api.get('protocols');
+  $app.innerHTML = `<div class="row"><h2>プロトコルの管理</h2><span class="spacer"></span><button class="primary" id="newp">＋ 新しいプロトコル</button></div>
+    <div class="card"><table class="list"><tr><th style="width:70px">順番</th><th>名前</th><th>更新</th><th></th></tr>
+    ${ps.map((p, i) => `<tr><td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === ps.length - 1 ? 'disabled' : ''}>↓</button></td>
+      <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td class="muted">${esc(p.updated.slice(0, 16))}</td>
+      <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
+      <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table></div>`;
+  document.getElementById('newp').onclick = () => go('#/protocol/new');
+  $app.onclick = async e => {
+    const t = e.target;
+    if (t.dataset.mv) { await api.send('POST', `protocols/${t.dataset.id}/move`, { dir: +t.dataset.mv }); viewProtocols(); }
+    else if (t.dataset.dup) { await api.send('POST', `protocols/${t.dataset.dup}/duplicate`); toast('複製しました'); viewProtocols(); }
+    else if (t.dataset.del) { if (confirm(`「${t.dataset.name}」を削除しますか？\n（これまでの記録は消えません）`)) { await api.send('DELETE', `protocols/${t.dataset.del}`); viewProtocols(); } }
+  };
+}
+
+async function viewProtocolEdit(id) {
+  $app.onclick = null;
+  let doc = id === 'new' ? { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } } : (await api.get('protocols/' + id)).data;
+  if (id === 'new') { doc.blocks[0].text = '材料'; }
+  $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
+      <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
+      <a class="btn" href="#/protocols">一覧へ戻る</a> <button class="primary" id="save">保存</button></div></div>
+    <div class="split"><div id="ed"></div><div class="preview-wrap"><div class="legend">印刷イメージ（幅17cm）　<span class="sw" style="background:#d9d9d9">灰色</span>＝可変欄　赤い横線＝ページの区切り（目安）</div><div id="pv"></div></div></div>`;
+  const pv = document.getElementById('pv');
+  const chem = document.getElementById('chem');
+  const draw = () => { pv.innerHTML = renderDoc(doc, { mode: 'preview', memo: true, chem: chem.checked }); };
+  let t;
+  mountEditor(document.getElementById('ed'), doc, () => { dirty = true; clearTimeout(t); t = setTimeout(draw, 250); });
+  chem.onchange = draw;
+  draw();
+  document.getElementById('save').onclick = async () => {
+    if (!doc.name) doc.name = doc.title || '無題';
+    if (id === 'new') { const r = await api.send('POST', 'protocols', { data: doc }); dirty = false; toast('保存しました'); go('#/protocol/' + r.id); }
+    else { await api.send('PUT', 'protocols/' + id, { data: doc }); dirty = false; toast('保存しました'); }
+  };
+}
+
+async function viewNewRecord(pid) {
+  const p = await api.get('protocols/' + pid);
+  const pd = p.data;
+  const rec = {
+    protocol_id: p.id, protocol_name: pd.name, exp_date: today(),
+    doc: { title: pd.title, blocks: clone(pd.blocks), memo: clone(pd.memo || { text: '', print: false }) },
+    opts: { chem: true, memo: !!(pd.memo && pd.memo.print), date: true, cut: true },
+  };
+  recordEditor(rec, null);
+}
+async function viewRecord(id) {
+  const r = await api.get('records/' + id);
+  recordEditor(r.data, +id);
+}
+function recordEditor(rec, id) {
+  $app.onclick = null;
+  let tab = 'fill';
+  $app.innerHTML = `<div class="toolbar">
+      <div class="row"><h2 style="margin:0">${esc(rec.protocol_name)}</h2><span class="muted">${id ? `記録 No.${id}` : '新しい記録（まだ保存していません）'}</span><span class="spacer"></span>
+        <a class="btn" href="#/records">一覧へ</a>
+        <button id="save">保存</button>
+        <button class="primary" id="toPrint">保存して印刷プレビュー</button></div>
+      <div class="row" style="margin-top:8px">実験日 <input type="date" id="date" value="${esc(rec.exp_date)}">
+        <label><input type="checkbox" id="o-date" ${rec.opts.date ? 'checked' : ''}> 日付を印字</label>
+        <label><input type="checkbox" id="o-chem" ${rec.opts.chem !== false ? 'checked' : ''}> 化学式の数字を下付き</label>
+        <label><input type="checkbox" id="o-memo" ${rec.opts.memo ? 'checked' : ''}> メモも印刷</label>
+        <label><input type="checkbox" id="o-cut" ${rec.opts.cut ? 'checked' : ''}> 切り取り線（17×27cm）</label>
+        <span class="muted" id="blanks"></span></div>
+      <div class="tabs"><button data-tab="fill" class="on">入力（黄色の欄だけ）</button><button data-tab="edit">全体を編集</button></div></div>
+    <div id="body"></div>`;
+  const body = document.getElementById('body');
+  const doc = rec.doc;
+  const upd = () => { const n = countBlanks(doc); document.getElementById('blanks').textContent = n ? `未入力の可変欄：${n}個` : '可変欄はすべて入力済み'; };
+  const drawFill = () => {
+    body.innerHTML = `<div class="legend">黄色の欄に入力してください（Tabキーで次の欄へ）。空欄のまま印刷すると、手書き用の灰色の空欄になります。</div>${renderDoc(doc, { mode: 'fill', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}`;
+    upd();
+  };
+  const drawEdit = () => {
+    body.innerHTML = `<div class="split"><div id="ed"></div><div class="preview-wrap"><div class="legend">印刷イメージ</div><div id="pv"></div></div></div>`;
+    const pv = document.getElementById('pv');
+    const draw = () => { pv.innerHTML = renderDoc(doc, { mode: 'preview', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false }); upd(); };
+    let t;
+    mountEditor(document.getElementById('ed'), doc, () => { dirty = true; clearTimeout(t); t = setTimeout(draw, 250); }, { withMeta: false });
+    draw();
+  };
+  const redraw = () => (tab === 'fill' ? drawFill() : drawEdit());
+  redraw();
+  body.addEventListener('input', e => {
+    const t = e.target;
+    if (!t.classList.contains('vin')) return;
+    dirty = true;
+    if (t.dataset.num) setPath(doc, t.dataset.path, t.value);
+    else setPath(doc, t.dataset.path, setToken(getPath(doc, t.dataset.path), +t.dataset.k, t.value));
+    t.classList.toggle('empty', !t.value);
+    t.style.width = Math.max(3, Math.min(30, (t.value || t.placeholder || '').length * 0.75 + 1.5)) + 'em';
+    upd();
+  });
+  body.addEventListener('change', e => {
+    if (!e.target.classList.contains('vin') || tab !== 'fill') return;
+    setTimeout(() => {
+      const key = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
+      const y = window.scrollY;
+      drawFill();
+      window.scrollTo(0, y);
+      if (key) { const el = body.querySelector(`[data-key="${CSS.escape(key)}"]`); if (el) el.focus(); }
+    }, 0);
+  });
+  document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
+    tab = b.dataset.tab;
+    document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('on', x === b));
+    redraw();
+  });
+  const optBind = (elId, key) => document.getElementById(elId).onchange = e => { rec.opts[key] = e.target.checked; dirty = true; redraw(); };
+  optBind('o-date', 'date'); optBind('o-chem', 'chem'); optBind('o-memo', 'memo'); optBind('o-cut', 'cut');
+  document.getElementById('date').onchange = e => { rec.exp_date = e.target.value; dirty = true; redraw(); };
+  const save = async () => {
+    if (id) await api.send('PUT', 'records/' + id, { data: rec });
+    else { const r = await api.send('POST', 'records', { data: rec }); id = r.id; }
+    dirty = false;
+    return id;
+  };
+  document.getElementById('save').onclick = async () => {
+    const wasNew = !id;
+    await save(); toast('保存しました');
+    if (wasNew) { currentHash = '#/record/' + id; history.replaceState(null, '', currentHash); document.querySelector('.toolbar .muted').textContent = `記録 No.${id}`; }
+  };
+  document.getElementById('toPrint').onclick = async () => {
+    const n = countBlanks(doc);
+    if (n && !confirm(`未入力の可変欄が ${n} 個あります。\n空欄のまま進むと、手書き用の灰色の空欄として印刷されます。進みますか？`)) return;
+    await save();
+    go('#/print/' + id);
+  };
+}
+
+async function viewRecords() {
+  $app.onclick = null;
+  $app.innerHTML = `<div class="row"><h2>記録の一覧</h2><span class="spacer"></span><input type="text" id="q" placeholder="検索（プロトコル名・日付・中身の文字）" style="width:320px"></div><div class="card" id="list">読み込み中…</div>`;
+  const list = document.getElementById('list');
+  const load = async () => {
+    const q = document.getElementById('q').value.trim();
+    const rs = await api.get('records' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    list.innerHTML = rs.length ? `<table class="list"><tr><th>No.</th><th>実験日</th><th>プロトコル</th><th>保存</th><th>印刷</th><th></th></tr>
+      ${rs.map(r => `<tr><td>${r.id}</td><td>${esc(r.exp_date)}</td><td><a href="#/record/${r.id}">${esc(r.protocol_name)}</a></td>
+        <td class="muted">${esc(r.updated.slice(0, 16))}</td><td class="muted">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td>
+        <td style="white-space:nowrap"><a class="btn small" href="#/record/${r.id}">開く</a> <a class="btn small" href="#/print/${r.id}">もう一度印刷</a>
+        <button class="small" data-dup="${r.id}">複製して次の実験へ</button> <button class="small danger" data-del="${r.id}">削除</button></td></tr>`).join('')}</table>` : '<p class="muted">記録はありません。</p>';
+  };
+  let t;
+  document.getElementById('q').oninput = () => { clearTimeout(t); t = setTimeout(load, 250); };
+  list.onclick = async e => {
+    const tg = e.target;
+    if (tg.dataset.dup) { const r = await api.send('POST', `records/${tg.dataset.dup}/duplicate`); toast('複製しました（実験日は今日になっています）'); go('#/record/' + r.id); }
+    else if (tg.dataset.del) { if (confirm(`記録 No.${tg.dataset.del} を削除しますか？（元に戻せません）`)) { await api.send('DELETE', `records/${tg.dataset.del}`); load(); } }
+  };
+  load();
+}
+
+async function viewPrint(id) {
+  $app.onclick = null;
+  const r = await api.get('records/' + id);
+  const rec = r.data;
+  $app.innerHTML = `<div class="toolbar no-print"><div class="row"><h2 style="margin:0">印刷プレビュー</h2><span class="muted">${esc(rec.protocol_name)}　記録 No.${id}</span><span class="spacer"></span>
+      <a class="btn" href="#/record/${id}">← 入力に戻る</a> <button class="primary big" id="pr">印刷する</button></div>
+      <div class="muted" style="margin-top:6px">印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。赤い横線はページの区切りの目安で、印刷はされません。</div></div>
+    ${renderDoc(rec.doc, { mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}
+    <div class="cutguide ${rec.opts.cut ? 'on' : ''}"></div>`;
+  document.getElementById('pr').onclick = () => window.print();
+  window.onafterprint = async () => { if (location.hash === '#/print/' + id) { await api.send('POST', `records/${id}/printed`); toast('印刷日時を記録しました'); } };
+}
+
+function viewHelp() {
+  $app.onclick = null;
+  const ex = (s, chem = true) => `<span class="sheet" style="display:inline;box-shadow:none;background:none;padding:0;width:auto">${inlineFmt(s, { mode: 'preview', chem })}</span>`;
+  $app.innerHTML = `<h2>書き方のヘルプ</h2>
+  <div class="card"><h3 style="margin-top:0">文字の書式</h3><table class="help-table"><tr><th>書き方</th><th>印刷</th><th>意味</th></tr>
+    ${[['[[サンプル数]]', '毎回変わる欄（可変欄）。入力画面で黄色の欄になる。空欄のまま印刷すると灰色の手書き欄'],
+       ['[[=5.6]]', '既定値つきの可変欄（ラベルなし）'], ['[[温度=37]]℃', '既定値つきの可変欄（ラベルあり）'],
+       ['**Buffer P1**', '太字'], ['==37℃==', '強調（黄色の蛍光ペン）'], ['!!無菌操作!!', '注意（赤字）'], ['__50mLファルコン__', '下線'], ['||PCR||', '枠囲み'],
+       ['Orc2(1-236)', '自動：タンパク質名の直後の残基範囲は上付き'], ['His12, His6-Orc2', '自動：タグの個数は下付き'],
+       ['MgCl2, (NH4)2SO4, H2O', '自動：化学式の数字は下付き（記録画面のチェックで切り替え）'],
+       ['Mg^{2+}', '手動の上付き'], ['K_{d}', '手動の下付き']].map(([s, m]) => `<tr><td><code>${esc(s)}</code></td><td>${ex(s)}</td><td>${esc(m)}</td></tr>`).join('')}</table>
+    <p class="muted">自動変換が困るとき（例：プライマー名 KO1 などが化学式と誤認されたとき）は、記録画面の「化学式の数字を下付き」を外すか、^{ } _{ } で手動で書いてください。</p></div>
+  <div class="card"><h3 style="margin-top:0">操作手順ブロックの書き方</h3>
+    <pre style="font-family:var(--mincho);background:#f7f7f7;padding:10px">・遠心（14,000rpm、1min、25℃）
+・上清をピペットで除く
+　・字下げした行は補足（矢印は入らない）
+※「※」で始まる行も補足
+
+・空行で区切ると、次のステップとの間に矢印が入らない</pre>
+    ${renderSteps('・遠心（14,000rpm、1min、25℃）\n・上清をピペットで除く\n　・字下げした行は補足（矢印は入らない）\n※「※」で始まる行も補足\n\n・空行で区切ると、次のステップとの間に矢印が入らない', { mode: 'print', chem: true }).replace(/^/, '<div class="sheet" style="box-shadow:none">') + '</div>'}</div>`;
+}
+
+router();

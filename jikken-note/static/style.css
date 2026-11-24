@@ -92,6 +92,11 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .sheet .gap { height: 0.8em; }
 .sheet .arrow { font-weight: bold; line-height: 1.35; }
 .sheet .stepgrp { break-inside: avoid; }
+/* ステップ間の矢印：補足の行の左を通り、行が多いほど長くなる */
+.sheet .flow { position: relative; }
+.sheet .flow-arrow { position: absolute; left: 0.45em; top: 0.1em; bottom: 0.25em; border-left: 1.1pt solid #000; }
+.sheet .flow-arrow::after { content: ""; position: absolute; bottom: -0.15em; left: calc(-0.32em - 0.55pt); border-left: 0.32em solid transparent; border-right: 0.32em solid transparent; border-top: 0.5em solid #000; }
+.sheet .flow-end { height: 1.15em; }
 .sheet .block { margin: 0; }
 .sheet b { font-weight: bold; }
 .sheet mark.hl { background: #fff200; color: inherit; padding: 0; }

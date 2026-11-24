@@ -154,24 +154,36 @@ function renderText(str, ctx) {
   return String(str || '').split('\n').map(l => { const { ind, text } = splitIndent(l); return lineHtml(text, ind, ctx); }).join('');
 }
 function renderSteps(str, ctx) {
-  // 1行1ステップ。字下げした行・※で始まる行は補足。ステップの間に「↓」を自動で入れる。空行で区切ると矢印なし。
-  const lines = String(str || '').split('\n');
-  let out = '', grp = '', prevStep = false, stepInd = 0;
-  const flush = () => { if (grp) out += `<div class="stepgrp">${grp}</div>`; grp = ''; };
-  for (const raw of lines) {
+  // 1行1ステップ。字下げした行・※で始まる行は補足。
+  // ステップの間には下向きの矢印を自動で入れる。補足があるときは、矢印が補足の横を通って長くなる。
+  // 空行で区切ると矢印は入らない。
+  const groups = [[]];
+  for (const raw of String(str || '').split('\n')) {
     const { ind, text } = splitIndent(raw);
-    if (text === '') { flush(); out += '<div class="gap"></div>'; prevStep = false; continue; }
+    if (text === '') { if (groups[groups.length - 1].length) groups.push([]); continue; }
     if (/^[↓⇓]$/.test(text.trim())) continue;
-    const isStep = ind === 0 && !/^[※＊*]/.test(text);
-    if (isStep) {
-      flush();
-      if (prevStep) out += `<div class="arrow" style="padding-left:${stepInd}em">↓</div>`;
-      prevStep = true; stepInd = 0;
-    }
-    grp += lineHtml(text, ind, ctx);
+    const g = groups[groups.length - 1];
+    const isStep = ind === 0 && !/^[※＊*]/.test(String(text).replace(/\*\*|__|==|!!/g, ''));
+    if (isStep) g.push({ step: text, notes: [] });
+    else if (g.length) g[g.length - 1].notes.push({ ind, text });
+    else g.push({ step: null, notes: [{ ind, text }] });
   }
-  flush();
-  return out;
+  const parts = [];
+  for (const g of groups) {
+    if (!g.length) continue;
+    let h = '';
+    g.forEach((st, i) => {
+      if (st.step !== null) h += `<div class="stepgrp">${lineHtml(st.step, 0, ctx)}</div>`;
+      const next = g[i + 1];
+      if (st.step !== null && next && next.step !== null) {
+        h += `<div class="flow"><div class="flow-arrow"></div>${st.notes.map(n => lineHtml(n.text, Math.max(n.ind, 1.2), ctx)).join('')}<div class="flow-end"></div></div>`;
+      } else {
+        h += st.notes.map(n => lineHtml(n.text, n.ind, ctx)).join('');
+      }
+    });
+    parts.push(h);
+  }
+  return parts.join('<div class="gap"></div>');
 }
 function matCompute(b) {
   const n = num(b.n);
@@ -418,7 +430,7 @@ function blockEditorHtml(b, i, n) {
         字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
       break;
     case 'steps':
-      body = `<div class="muted">1行に1ステップ。ステップの間には「↓」が自動で入ります。行頭を全角スペースで字下げした行と「※」で始まる行は補足になります。空行で区切ると矢印は入りません。</div>${ta(bp + '.text', b.text, 6)}
+      body = `<div class="muted">1行に1ステップ。ステップの間には下向きの矢印が自動で入ります。行頭を全角スペースで字下げした行と「※」で始まる行は補足になり、補足があると矢印がその横を通って長くなります。空行で区切ると矢印は入りません。</div>${ta(bp + '.text', b.text, 6)}
         <div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
       break;
     case 'text':

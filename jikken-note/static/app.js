@@ -484,7 +484,8 @@ function blockEditorHtml(b, i, n) {
         <button type="button" class="small" data-act="pcradd" data-path="${bp}.steps">＋ 段階を追加</button>`;
       break;
     case 'image':
-      body = `<div class="row"><input type="file" accept="image/*" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
+      body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（PNG・JPEG など）</span></div>
+        <div class="row"><input type="file" accept="image/*" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
         ${b.src ? '<span class="muted">画像あり</span>' : '<span class="muted">画像なし</span>'}</div>`;
       break;
   }
@@ -543,12 +544,17 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
     else return;
     render(); onChange();
   };
+  const setImage = (i, file) => {
+    if (!/^image\//.test(file.type)) { alert('画像ファイル（PNG・JPEG など）を選んでください。'); return; }
+    const fr = new FileReader();
+    fr.onload = () => { doc.blocks[i].src = fr.result; render(); onChange(); };
+    fr.readAsDataURL(file);
+  };
+  imageDropHandler = setImage;
   el.addEventListener('change', e => {
     const t = e.target;
     if (t.dataset.act !== 'img' || !t.files[0]) return;
-    const fr = new FileReader();
-    fr.onload = () => { doc.blocks[+t.dataset.i].src = fr.result; render(); onChange(); };
-    fr.readAsDataURL(t.files[0]);
+    setImage(+t.dataset.i, t.files[0]);
   });
 }
 
@@ -757,20 +763,29 @@ function structureImport(items, fname) {
   return out;
 }
 let pendingImport = null;
-async function importFile(file) {
+async function readImportFile(file) {
   const name = file.name || '';
   const low = name.toLowerCase();
   let items;
-  toast('読み取り中…');
   try {
     if (low.endsWith('.docx')) items = (await api.send('POST', 'import', { name, data: await fileToBase64(file) })).items;
     else if (low.endsWith('.pdf')) items = await pdfToItems(file);
     else if (low.endsWith('.txt')) items = (await file.text()).split(/\r?\n/).map(t => ({ type: 'p', text: t, plain: t, ind: 0, pdf: true }));
-    else if (low.endsWith('.doc')) { alert('古い Word 形式（.doc）は読めません。Word で開いて「名前を付けて保存」→「Word 文書 (*.docx)」で保存してから取り込んでください。'); return; }
-    else { alert('取り込めるのは Word（.docx）・PDF・テキスト（.txt）です。'); return; }
-  } catch (e) { if (!/保存・読み込み/.test(String(e))) alert('読み取れませんでした: ' + e.message); return; }
+    else if (low.endsWith('.doc')) { alert(`「${name}」は古い Word 形式（.doc）なので読めません。Word で開いて「名前を付けて保存」→「Word 文書 (*.docx)」で保存してから取り込んでください。`); return []; }
+    else { alert(`「${name}」は取り込めません。取り込めるのは Word（.docx）・PDF・テキスト（.txt）です。`); return []; }
+  } catch (e) { if (!/保存・読み込み/.test(String(e))) alert(`「${name}」を読み取れませんでした: ` + e.message); return []; }
   const protos = structureImport(items, name);
-  if (!protos.length) { alert('文字を読み取れませんでした。（画像だけのPDF＝スキャンした紙などは読み取れません）'); return; }
+  if (!protos.length) alert(`「${name}」から文字を読み取れませんでした。（画像だけのPDF＝スキャンした紙などは読み取れません）`);
+  return protos;
+}
+async function importFile(file) { return importFiles([file]); }
+async function importFiles(files) {
+  files = [...files];
+  if (!files.length) return;
+  toast(files.length > 1 ? `${files.length} 個のファイルを読み取り中…` : '読み取り中…');
+  let protos = [];
+  for (const f of files) protos = protos.concat(await readImportFile(f));
+  if (!protos.length) return;
   if (protos.length === 1) { pendingImport = protos[0]; go('#/protocol/new'); return; }
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
@@ -795,16 +810,48 @@ async function importFile(file) {
 }
 function importCardHtml() {
   return `<div class="card drop" id="drop"><div class="row"><b>Word・PDFから取り込む</b>
-    <label class="btn primary">ファイルを選ぶ<input type="file" id="impfile" accept=".docx,.pdf,.txt,.doc" hidden></label>
-    <span class="muted">またはここにファイルをドラッグ＆ドロップ。今までのプロトコルから大まかな形を自動で作ります（取り込んだ後に自由に直せます）。</span></div></div>`;
+    <label class="btn primary">ファイルを選ぶ<input type="file" id="impfile" accept=".docx,.pdf,.txt,.doc" multiple hidden></label>
+    <span class="muted">またはファイルを画面のどこかにドラッグ＆ドロップ（複数ファイルもまとめて取り込めます）。今までのプロトコルから大まかな形を自動で作ります（取り込んだ後に自由に直せます）。</span></div></div>`;
 }
 function bindImportCard() {
   const inpEl = document.getElementById('impfile'), drop = document.getElementById('drop');
-  inpEl.onchange = () => { if (inpEl.files[0]) importFile(inpEl.files[0]); inpEl.value = ''; };
-  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
-  drop.ondragleave = () => drop.classList.remove('over');
-  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) importFile(e.dataTransfer.files[0]); };
+  inpEl.onchange = () => { if (inpEl.files.length) importFiles(inpEl.files); inpEl.value = ''; };
 }
+
+// ---------- ドラッグ＆ドロップ（画面のどこに落としても取り込む） ----------
+let imageDropHandler = null;
+(() => {
+  const ov = document.createElement('div');
+  ov.id = 'dropov'; ov.className = 'no-print';
+  document.body.appendChild(ov);
+  let depth = 0;
+  const hasFiles = e => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
+  const zoneOf = e => (e.target && e.target.closest) ? e.target.closest('[data-imgdrop]') : null;
+  const hide = () => { depth = 0; ov.classList.remove('on'); document.querySelectorAll('.imgdrop.over').forEach(z => z.classList.remove('over')); };
+  document.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; ov.classList.add('on'); });
+  document.addEventListener('dragover', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+    const z = zoneOf(e);
+    document.querySelectorAll('.imgdrop.over').forEach(x => { if (x !== z) x.classList.remove('over'); });
+    if (z) z.classList.add('over');
+    ov.textContent = z ? 'ここで離すと、この画像ブロックに画像を入れます' : 'ここで離すと取り込みます（Word・PDF・テキスト。複数ファイルもOK）';
+    ov.classList.toggle('img', !!z);
+  });
+  document.addEventListener('dragleave', e => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) hide(); });
+  document.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();   // ブラウザがファイルを開いてしまうのを防ぐ
+    const z = zoneOf(e);
+    hide();
+    const files = [...e.dataTransfer.files];
+    if (!files.length) return;
+    if (z && imageDropHandler && document.body.contains(z)) { imageDropHandler(+z.dataset.imgdrop, files[0]); return; }
+    const docs = files.filter(f => !/^image\//.test(f.type));
+    if (!docs.length) { alert('画像は、プロトコル編集画面の「画像」ブロックの枠にドロップしてください。'); return; }
+    importFiles(docs);
+  });
+})();
 
 // ============================================================
 // 各画面

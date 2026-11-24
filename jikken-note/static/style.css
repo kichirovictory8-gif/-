@@ -38,6 +38,12 @@ table.list tr:hover td { background: #fafcff; }
 .banner { position: sticky; top: 42px; z-index: 30; display: flex; gap: 12px; align-items: center; justify-content: center; background: #fff4ce; border-bottom: 1px solid #e0c060; padding: 8px 16px; font-size: 14px; }
 .drop { border: 2px dashed #9fb4cc; background: #f7fbff; }
 .drop.over { background: #e3f0ff; border-color: var(--accent); }
+#dropov { display: none; position: fixed; inset: 0; z-index: 60; pointer-events: none; background: rgba(31,95,168,.12); border: 4px dashed var(--accent); align-items: flex-start; justify-content: center; padding-top: 30vh; font-size: 22px; font-weight: bold; color: #1f3b5c; }
+#dropov.on { display: flex; }
+#dropov.img { background: rgba(31,95,168,.04); }
+.imgdrop { border: 2px dashed #9fb4cc; background: #f7fbff; border-radius: 6px; padding: 10px; margin-bottom: 6px; text-align: center; color: #5a6b7d; display: flex; align-items: center; gap: 10px; justify-content: center; min-height: 54px; }
+.imgdrop img { max-height: 60px; max-width: 140px; }
+.imgdrop.over { background: #dcebff; border-color: var(--accent); }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #263238; color: #fff; padding: 10px 18px; border-radius: 6px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 50; }
 #toast.show { opacity: .95; }
 .toolbar { position: sticky; top: 46px; z-index: 10; background: #eef1f4; padding: 8px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }

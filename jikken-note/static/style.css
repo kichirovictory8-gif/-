@@ -107,11 +107,16 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .sheet .ln.hang { text-indent: -1em; }
 .sheet .gap { height: 0.8em; }
 .sheet .arrow { font-weight: bold; line-height: 1.35; }
-.sheet .stepgrp { break-inside: avoid; }
-/* ステップ間の矢印：補足の行の左を通り、行が多いほど長くなる */
+/* ページの途中で切らないまとまり（項目＋補足＋矢印、文章の段落） */
+.sheet .keep { break-inside: avoid; page-break-inside: avoid; }
+/* 見出しだけがページの最後に残らないように */
+.sheet .blk-h, .sheet .h-sub, .sheet h1.ptitle { break-after: avoid; page-break-after: avoid; }
+.sheet .block:has(> .blk-h), .sheet .block:has(> .h-sub) { break-after: avoid; page-break-after: avoid; }
+/* ステップ間の矢印：補足の行の左を通り、行が多いほど長くなる。線と矢じりは同じ中心線にそろえる */
 .sheet .flow { position: relative; }
-.sheet .flow-arrow { position: absolute; left: 0.45em; top: 0.1em; bottom: 0.25em; border-left: 1.1pt solid #000; }
-.sheet .flow-arrow::after { content: ""; position: absolute; bottom: -0.15em; left: calc(-0.32em - 0.55pt); border-left: 0.32em solid transparent; border-right: 0.32em solid transparent; border-top: 0.5em solid #000; }
+.sheet .flow-arrow { position: absolute; left: 0.5em; top: 0.1em; bottom: 0.2em; width: 0; }
+.sheet .flow-arrow .fa-line { position: absolute; left: 0; top: 0; bottom: 0.4em; width: 1.2pt; transform: translateX(-50%); background: #000; }
+.sheet .flow-arrow .fa-head { position: absolute; left: 0; bottom: 0; width: 0.62em; height: 0.5em; transform: translateX(-50%); display: block; overflow: visible; }
 .sheet .flow-end { height: 1.15em; }
 .sheet .block { margin: 0; }
 .sheet b { font-weight: bold; }

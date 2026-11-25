@@ -154,8 +154,20 @@ function lineHtml(text, ind, ctx, extraCls = '') {
   return `<div class="ln${hang ? ' hang' : ''} ${extraCls}" style="padding-left:${ind + (hang ? 1 : 0)}em">${inlineFmt(text, ctx)}</div>`;
 }
 function renderText(str, ctx) {
-  return String(str || '').split('\n').map(l => { const { ind, text } = splitIndent(l); return lineHtml(text, ind, ctx); }).join('');
+  // 行頭から始まる行と、その下の字下げした行をひとまとまりにして、ページの途中で切れないようにする
+  let out = '', unit = '';
+  const flush = () => { if (unit) out += `<div class="keep">${unit}</div>`; unit = ''; };
+  for (const l of String(str || '').split('\n')) {
+    const { ind, text } = splitIndent(l);
+    if (text === '') { flush(); out += '<div class="gap"></div>'; continue; }
+    if (ind === 0) flush();
+    unit += lineHtml(text, ind, ctx);
+  }
+  flush();
+  return out;
 }
+// ステップ間の下向き矢印（線と矢じりを同じ中心線にそろえる）
+const ARROW_HTML = '<div class="flow-arrow"><div class="fa-line"></div><svg class="fa-head" viewBox="0 0 10 8" preserveAspectRatio="none"><polygon points="0,0 10,0 5,8" fill="#000"/></svg></div>';
 function renderSteps(str, ctx) {
   // 1行1ステップ。字下げした行・※で始まる行は補足。
   // ステップの間には下向きの矢印を自動で入れる。補足があるときは、矢印が補足の横を通って長くなる。
@@ -183,13 +195,15 @@ function renderSteps(str, ctx) {
     if (!g.length) continue;
     let h = '';
     g.forEach((st, i) => {
-      if (st.step !== null) h += `<div class="stepgrp">${lineHtml(st.step, 0, ctx)}</div>`;
+      // 項目・補足・次への矢印をひとまとまりにして、ページの途中で切れないようにする
+      let u = st.step !== null ? lineHtml(st.step, 0, ctx) : '';
       const next = g[i + 1];
       if (st.step !== null && next && next.step !== null) {
-        h += `<div class="flow"><div class="flow-arrow"></div>${st.notes.map(n => noteHtml(n, 1.2)).join('')}<div class="flow-end"></div></div>`;
+        u += `<div class="flow">${ARROW_HTML}${st.notes.map(n => noteHtml(n, 1.2)).join('')}<div class="flow-end"></div></div>`;
       } else {
-        h += st.notes.map(n => noteHtml(n, 0)).join('');
+        u += st.notes.map(n => noteHtml(n, 0)).join('');
       }
+      h += `<div class="stepunit keep">${u}</div>`;
     });
     parts.push(h);
   }

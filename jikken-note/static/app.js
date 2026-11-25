@@ -503,11 +503,13 @@ function blockEditorHtml(b, i, n) {
     <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${body}
     <div class="addbar" style="margin:6px 0 0"><span class="muted">この下に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="${i + 1}">${v}</button>`).join('')}</div></div>`;
 }
-function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
+function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {}) {
   const render = () => {
     el.innerHTML = `
       ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}</div></div>` : ''}
-      <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div></div>
+      <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div>
+        ${withMeta ? `<div class="row" style="margin-top:8px">タグ <span id="pe-tags">${tagBoxHtml(doc.tags || [])}</span></div>
+        <div class="muted">同じタグの注意点が、このプロトコルで記録を書くときに自動で表示されます（例：PCR、無菌操作、DMSO）。</div>` : ''}</div>
       <div class="card">${markupBar()}
         <div class="addbar"><span class="muted">先頭に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="0">${v}</button>`).join('')}</div>
         ${doc.blocks.map((b, i) => blockEditorHtml(b, i, doc.blocks.length)).join('')}
@@ -515,9 +517,11 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
       <div class="card meta"><h3 style="margin-top:0">メモ（解説・注意点など）</h3>
         <div class="muted">印刷するかどうかは記録の画面で選べます。</div>
         ${ta('memo.text', (doc.memo || {}).text, 4)}
+        ${withMeta ? '<button type="button" class="small" data-act="memo2notes">このメモを「注意点・考え方」に移す</button>' : ''}
         <label><input type="checkbox" data-bind="memo.print" ${(doc.memo || {}).print ? 'checked' : ''}> 最初から「メモも印刷」にしておく</label></div>`;
     bindMarkupBar(el);
     bindGelDrag(el, doc, () => { render(); onChange(); });
+    bindTagBox(el.querySelector('#pe-tags .tagbox'), () => doc.tags || [], t => { doc.tags = t; }, () => { onChange(); if (onTags) onTags(doc.tags); });
   };
   if (!doc.memo) doc.memo = { text: '', print: false };
   render();
@@ -550,6 +554,7 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
     else if (a === 'tc+') B[i].rows.forEach(r => r.push(''));
     else if (a === 'tc-') { if (B[i].rows[0].length > 1) B[i].rows.forEach(r => r.pop()); }
     else if (a === 'taigen') { openTaigen(B[i].text || '', v => { B[i].text = v; render(); onChange(); }); return; }
+    else if (a === 'memo2notes') { openMemoToNotes(doc, clear => { if (clear) { doc.memo.text = ''; render(); onChange(); } }); return; }
     else return;
     render(); onChange();
   };
@@ -560,6 +565,7 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
     if (t.dataset.act !== 'img' || !t.files[0]) return;
     setImage(+t.dataset.i, t.files[0]);
   });
+  return { render };
 }
 
 
@@ -1069,6 +1075,282 @@ function refreshGelPreview(root, doc, t) {
   return true;
 }
 
+
+// ============================================================
+// 注意点・考え方（タグで分類・検索。プロトコルのタグと連動して自動表示）
+// ============================================================
+const normSearch = s => String(s || '').normalize('NFKC').toLowerCase();
+const normTag = t => String(t || '').normalize('NFKC').trim().replace(/^[#＃]+/, '').trim();
+async function refreshTagList() {
+  let dl = document.getElementById('taglist-dl');
+  if (!dl) { dl = document.createElement('datalist'); dl.id = 'taglist-dl'; document.body.appendChild(dl); }
+  try { const tags = await quietGet('tags'); dl.innerHTML = tags.map(t => `<option value="${esc(t.tag)}">`).join(''); } catch (e) { /* 無視 */ }
+}
+function tagChip(t, extra = '') { return `<span class="tagchip" ${extra}>#${esc(t)}</span>`; }
+function tagBoxHtml(tags) {
+  return `<span class="tagbox">${(tags || []).map((t, k) => `<span class="tagchip">#${esc(t)}<button type="button" class="tx" data-tagdel="${k}" title="このタグを外す">×</button></span>`).join('')}<input type="text" class="taginp" list="taglist-dl" placeholder="タグを入力して Enter"></span>`;
+}
+// タグ入力欄の動き。getTags()/setTags(arr) でデータとつなぐ
+function bindTagBox(box, getTags, setTags, onChange) {
+  if (!box) return;
+  const redraw = () => {
+    if (!box.isConnected) return;
+    const nb = document.createElement('span'); nb.innerHTML = tagBoxHtml(getTags());
+    const fresh = nb.firstChild; box.replaceWith(fresh); bindTagBox(fresh, getTags, setTags, onChange); fresh.querySelector('.taginp').focus();
+  };
+  const inpEl = box.querySelector('.taginp');
+  const add = () => {
+    if (!box.isConnected) return false;
+    const parts = inpEl.value.split(/[,、，\s]+/).map(normTag).filter(Boolean);
+    inpEl.value = '';
+    if (!parts.length) return false;
+    const tags = getTags().slice();
+    for (const t of parts) if (!tags.includes(t)) tags.push(t);
+    setTags(tags); onChange(); redraw();
+    return true;
+  };
+  inpEl.addEventListener('keydown', e => {
+    if (e.isComposing) return;
+    if (e.key === 'Enter' || e.key === ',' || e.key === '、') { e.preventDefault(); add(); }
+    else if (e.key === 'Backspace' && !inpEl.value && getTags().length) { setTags(getTags().slice(0, -1)); onChange(); redraw(); }
+  });
+  inpEl.addEventListener('change', () => { if (inpEl.value.trim()) add(); });
+  box.querySelectorAll('[data-tagdel]').forEach(b => b.onclick = () => { const t = getTags().slice(); t.splice(+b.dataset.tagdel, 1); setTags(t); onChange(); redraw(); });
+}
+function noteBodyHtml(n) { return `<div class="sheet notebody">${renderText(n.data.body || '', { mode: 'print', chem: true })}</div>`; }
+function noteCardHtml(n, { actions = true, pick = false, open = true } = {}) {
+  const d = n.data;
+  return `<div class="notecard${d.important ? ' imp' : ''}" data-note="${n.id}">
+    <div class="nc-head">${pick ? `<input type="checkbox" class="nc-pick" data-pick="${n.id}" title="書面に追加するものを選ぶ">` : ''}
+      ${d.important ? '<span class="nc-star">★重要</span>' : ''}<span class="nc-title">${inlineFmt(d.title || '（題名なし）', { mode: 'print', chem: true })}</span>
+      <span class="nc-tags">${(d.tags || []).map(t => tagChip(t, `data-tagfilter="${esc(t)}"`)).join('')}</span>
+      ${actions ? `<span class="spacer"></span><button class="small" data-nedit="${n.id}">編集</button><button class="small danger" data-ndel="${n.id}">削除</button>` : ''}</div>
+    ${open ? noteBodyHtml(n) : ''}</div>`;
+}
+function openNoteEditor(note, onSaved) {
+  const isNew = !note;
+  const d = note ? clone(note.data) : { title: '', body: '', tags: [], important: false };
+  let base = note ? note.updated : null;
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal meta" style="width:min(1000px,96vw)"><h3 style="margin-top:0">${isNew ? '新しい注意点' : '注意点の編集'}</h3>
+    <div class="row">題名 <input type="text" data-f="title" value="${esc(d.title)}" placeholder="例：DMSOは一気に入れない" style="flex:1;min-width:260px">
+      <label><input type="checkbox" data-f="important" ${d.important ? 'checked' : ''}> ★重要</label></div>
+    <div class="row" style="margin-top:8px">タグ <span id="ne-tags">${tagBoxHtml(d.tags)}</span></div>
+    <div class="ne-grid"><div>${markupBar()}<textarea data-f="body" rows="12" placeholder="注意点や考え方の本文。書式（太字・赤字・可変欄など）も使えます。">${esc(d.body)}</textarea></div>
+      <div><div class="muted">表示イメージ</div><div id="ne-pv"></div></div></div>
+    <div class="row" style="margin-top:12px"><span class="spacer"></span><button data-x>閉じる</button><button class="primary" data-ok>保存</button></div></div>`;
+  document.body.appendChild(bg);
+  bindMarkupBar(bg);
+  const pv = bg.querySelector('#ne-pv');
+  const draw = () => { pv.innerHTML = noteBodyHtml({ data: d }); };
+  draw();
+  let changed = false;
+  bg.addEventListener('input', e => {
+    const f = e.target.dataset.f;
+    if (!f) return;
+    d[f] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    changed = true; if (f === 'body') draw();
+  });
+  bg.addEventListener('change', e => { if (e.target.dataset.f === 'important') { d.important = e.target.checked; changed = true; } });
+  bindTagBox(bg.querySelector('#ne-tags .tagbox'), () => d.tags, t => { d.tags = t; }, () => { changed = true; });
+  bg.querySelector('[data-x]').onclick = () => { if (!changed || confirm('保存していない変更があります。閉じますか？')) bg.remove(); };
+  bg.querySelector('[data-ok]').onclick = async () => {
+    const pending = bg.querySelector('.taginp');
+    if (pending && pending.value.trim()) { for (const t of pending.value.split(/[,、，\s]+/).map(normTag).filter(Boolean)) if (!d.tags.includes(t)) d.tags.push(t); }
+    if (!d.title.trim()) { alert('題名を入力してください。'); return; }
+    if (isNew) await api.send('POST', 'notes', { data: d });
+    else { const u = await putWithCheck('notes/' + note.id, d, base); if (!u) return; base = u; }
+    bg.remove(); toast('注意点を保存しました'); refreshTagList(); onSaved && onSaved();
+  };
+}
+function openTagManager(onDone) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  const draw = async () => {
+    const tags = await api.get('tags');
+    bg.innerHTML = `<div class="modal"><h3 style="margin-top:0">タグの整理</h3>
+      <p class="muted">タグの名前を変えると、そのタグが付いた注意点・プロトコル・記録のすべてが一緒に変わります。同じ名前のタグに変えると1つにまとまります。削除すると、すべてからそのタグが外れます（注意点やプロトコル自体は消えません）。<br>新しいタグは、注意点やプロトコルの「タグ」欄に入力すると作られます。</p>
+      ${tags.length ? `<table class="list"><tr><th>タグ</th><th>注意点</th><th>プロトコル</th><th>新しい名前</th><th></th></tr>
+      ${tags.map((t, k) => `<tr><td>${tagChip(t.tag)}</td><td>${t.notes}件</td><td>${t.protocols}件</td>
+        <td><input type="text" data-rn="${k}" value="${esc(t.tag)}" style="width:160px"></td>
+        <td style="white-space:nowrap"><button class="small" data-rename="${k}">名前を変える</button> <button class="small danger" data-del="${k}">削除</button></td></tr>`).join('')}</table>` : '<p>まだタグはありません。</p>'}
+      <div class="row" style="margin-top:12px"><span class="spacer"></span><button data-x>閉じる</button></div></div>`;
+    bg.onclick = async e => {
+      const t = e.target;
+      if (t.dataset.x !== undefined) { bg.remove(); onDone && onDone(); return; }
+      const k = t.dataset.rename ?? t.dataset.del;
+      if (k === undefined) return;
+      const from = tags[+k].tag;
+      let to = '';
+      if (t.dataset.rename !== undefined) {
+        to = normTag(bg.querySelector(`[data-rn="${k}"]`).value);
+        if (!to || to === from) return;
+      } else if (!confirm(`タグ「#${from}」を、すべての注意点・プロトコル・記録から外しますか？`)) return;
+      const r = await api.send('POST', 'tags/rename', { from, to });
+      toast(to ? `「#${from}」→「#${to}」（${r.changed}件）` : `「#${from}」を外しました（${r.changed}件）`);
+      refreshTagList(); draw();
+    };
+  };
+  document.body.appendChild(bg);
+  draw();
+}
+function matchNotes(notes, tags) {
+  const set = new Set((tags || []).map(normSearch));
+  return notes.filter(n => (n.data.tags || []).some(t => set.has(normSearch(t))))
+    .sort((a, b) => (b.data.important ? 1 : 0) - (a.data.important ? 1 : 0));
+}
+// 選んだ注意点を書面の末尾に「【注意点】」として追加
+function insertNotesIntoDoc(doc, notes) {
+  if (!notes.length) return;
+  const has = doc.blocks.some(b => b.type === 'heading' && stripMarks(b.text) === '注意点');
+  if (!has) doc.blocks.push({ type: 'heading', style: '【】', text: '注意点', extra: '' });
+  const lines = [];
+  notes.forEach((n, i) => {
+    if (i) lines.push('');
+    lines.push(`${n.data.important ? '!!★!!' : '・'}**${n.data.title}**`);
+    for (const l of String(n.data.body || '').split('\n')) lines.push(l.trim() ? '　' + l : '');
+  });
+  doc.blocks.push({ type: 'text', text: lines.join('\n') });
+}
+// 記録・プロトコル編集の上に出す「この実験の注意点」
+async function notesPanel(el, tags, onInsert, { label = 'この実験の注意点', target = '書面' } = {}) {
+  if (!el) return;
+  let notes;
+  try { notes = await quietGet('notes'); } catch (e) { el.innerHTML = ''; return; }
+  const hit = matchNotes(notes, tags);
+  const tagTxt = (tags || []).length ? tags.map(t => tagChip(t)).join(' ') : '';
+  if (!(tags || []).length) {
+    el.innerHTML = `<div class="notes-panel empty no-print">プロトコルにタグ（例：PCR、無菌操作）を付けると、同じタグの注意点がここに自動で出ます。<a href="#/notes">注意点・考え方を見る</a></div>`;
+    return;
+  }
+  if (!hit.length) {
+    el.innerHTML = `<div class="notes-panel empty no-print">${tagTxt} のタグが付いた注意点はまだありません。<a href="#/notes">注意点を書く</a></div>`;
+    return;
+  }
+  const imp = hit.filter(n => n.data.important).length;
+  el.innerHTML = `<details class="notes-panel no-print" open><summary>${esc(label)}（${hit.length}件${imp ? `・★重要 ${imp}件` : ''}）　${tagTxt}</summary>
+    <div class="np-list">${hit.map(n => noteCardHtml(n, { actions: false, pick: true })).join('')}</div>
+    <div class="row"><button class="small primary" data-np-insert>選んだ注意点を${esc(target)}の末尾に追加</button>
+      <span class="muted">チェックを入れたものが「【注意点】」として${esc(target)}に追加されます。追加した後は自由に直せます。</span></div></details>`;
+  el.querySelector('[data-np-insert]').onclick = () => {
+    const ids = [...el.querySelectorAll('[data-pick]:checked')].map(c => +c.dataset.pick);
+    if (!ids.length) { alert('追加する注意点にチェックを入れてください。'); return; }
+    onInsert(hit.filter(n => ids.includes(n.id)));
+    el.querySelectorAll('[data-pick]:checked').forEach(c => { c.checked = false; });
+    toast(`${ids.length} 件を${target}に追加しました`);
+  };
+}
+// プロトコルのメモ欄 → 注意点
+function splitMemo(text) {
+  const segs = [];
+  let cur = null;
+  for (const raw of String(text || '').split('\n')) {
+    const pl = stripMarks(raw).trim();
+    const m = pl.length <= 60 && pl.match(/^(?:〈([^〉]+)〉|【([^】]+)】|<([^>]+)>|●\s*(.+))(.*)$/);
+    if (m) {
+      cur = { title: (m[1] || m[2] || m[3] || m[4] || '').replace(/__|\*\*/g, '').trim(), lines: [] };
+      const rest = (m[5] || '').trim();
+      if (rest) cur.lines.push(rest);
+      segs.push(cur);
+    } else {
+      if (!cur) { cur = { title: '', lines: [] }; segs.push(cur); }
+      cur.lines.push(raw);
+    }
+  }
+  return segs.map(s => ({ title: s.title, body: s.lines.join('\n').replace(/^\n+|\n+$/g, '') })).filter(s => s.title || s.body.trim());
+}
+function openMemoToNotes(doc, onDone) {
+  const memo = (doc.memo || {}).text || '';
+  if (!memo.trim()) { alert('メモ欄が空です。'); return; }
+  const tags0 = (doc.tags && doc.tags.length) ? doc.tags.slice() : (doc.name ? [normTag(doc.name)] : []);
+  const segs = splitMemo(memo);
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal meta"><h3 style="margin-top:0">メモを注意点に移す</h3>
+    <div class="row"><label><input type="radio" name="mm" value="split" ${segs.length > 1 ? 'checked' : ''}> 見出しごとに分ける（${segs.length}件）</label>
+      <label><input type="radio" name="mm" value="one" ${segs.length > 1 ? '' : 'checked'}> 1件にまとめる</label></div>
+    <div class="row" style="margin-top:8px">付けるタグ <span id="mm-tags">${tagBoxHtml(tags0)}</span></div>
+    <p class="muted">見出しは〈 〉【 】● で始まる行を使います。登録した後に、注意点のページでいつでも直せます。</p>
+    <div class="np-list" id="mm-pv"></div>
+    <div class="row" style="margin-top:12px"><label><input type="checkbox" id="mm-clear"> 登録したらメモ欄を空にする</label><span class="spacer"></span><button data-x>やめる</button><button class="primary" data-ok>注意点として登録</button></div></div>`;
+  document.body.appendChild(bg);
+  let tags = tags0;
+  const list = () => {
+    const mode = bg.querySelector('input[name=mm]:checked').value;
+    const base = doc.name || doc.title || 'メモ';
+    return mode === 'one' ? [{ title: `${base}のメモ`, body: memo }] : segs.map((s, i) => ({ title: s.title || `${base}のメモ${i ? i + 1 : ''}`, body: s.body }));
+  };
+  const draw = () => { bg.querySelector('#mm-pv').innerHTML = list().map((x, i) => noteCardHtml({ id: i, data: { ...x, tags } }, { actions: false, open: false })).join(''); };
+  draw();
+  bg.querySelectorAll('input[name=mm]').forEach(r => r.onchange = draw);
+  bindTagBox(bg.querySelector('#mm-tags .tagbox'), () => tags, t => { tags = t; }, draw);
+  bg.querySelector('[data-x]').onclick = () => bg.remove();
+  bg.querySelector('[data-ok]').onclick = async () => {
+    const items = list();
+    for (const x of items) await api.send('POST', 'notes', { data: { title: x.title, body: x.body, tags, important: false } });
+    const clear = bg.querySelector('#mm-clear').checked;
+    bg.remove();
+    toast(`${items.length} 件を注意点に登録しました`);
+    refreshTagList();
+    onDone(clear);
+  };
+}
+// 注意点のページ
+let notesState = { q: '', tags: [], imp: false };
+async function viewNotes() {
+  $app.onclick = null;
+  const notes = await api.get('notes');
+  refreshTagList();
+  const counts = {};
+  notes.forEach(n => (n.data.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; }));
+  const tagNames = Object.keys(counts).sort((a, b) => a.localeCompare(b, 'ja'));
+  notesState.tags = notesState.tags.filter(t => counts[t]);
+  const q = normSearch(notesState.q).split(/\s+/).filter(Boolean);
+  const shown = notes.filter(n => {
+    const d = n.data;
+    if (notesState.imp && !d.important) return false;
+    if (notesState.tags.some(t => !(d.tags || []).includes(t))) return false;
+    const hay = normSearch([d.title, stripMarks(d.body || ''), (d.tags || []).join(' ')].join(' '));
+    return q.every(w => hay.includes(w));
+  }).sort((a, b) => (b.data.important ? 1 : 0) - (a.data.important ? 1 : 0));
+  $app.innerHTML = `<div class="row"><h2>注意点・考え方</h2><span class="spacer"></span>
+      <button id="tagman">タグの整理</button> <button class="primary" id="newnote">＋ 新しい注意点</button></div>
+    <div class="card"><div class="row"><input type="text" id="nq" value="${esc(notesState.q)}" placeholder="検索（題名・本文・タグ。スペースで区切ると全部を含むものだけ）" style="flex:1;min-width:280px;font-size:15px;padding:8px">
+      <label><input type="checkbox" id="nimp" ${notesState.imp ? 'checked' : ''}> ★重要だけ</label></div>
+      <div class="tagrow">${tagNames.length ? tagNames.map(t => `<span class="tagchip big${notesState.tags.includes(t) ? ' on' : ''}" data-tagfilter="${esc(t)}">#${esc(t)} <small>${counts[t]}</small></span>`).join('') : '<span class="muted">タグはまだありません。注意点にタグを付けるとここに並び、クリックで絞り込めます。</span>'}
+      ${notesState.tags.length ? '<button class="small" id="tagclear">絞り込みを解除</button>' : ''}</div></div>
+    <div class="muted" style="margin:0 0 8px">${shown.length} 件${notes.length !== shown.length ? `（全 ${notes.length} 件中）` : ''}</div>
+    <div id="nlist">${shown.length ? shown.map(n => noteCardHtml(n)).join('') : `<div class="card muted">${notes.length ? '条件に合う注意点はありません。' : 'まだ注意点はありません。「＋ 新しい注意点」から書くか、プロトコル編集画面のメモ欄から移せます。'}</div>`}</div>`;
+  const nq = document.getElementById('nq');
+  let t;
+  nq.oninput = () => { clearTimeout(t); t = setTimeout(() => { notesState.q = nq.value; const pos = nq.selectionStart; viewNotes().then(() => { const n2 = document.getElementById('nq'); n2.focus(); n2.setSelectionRange(pos, pos); }); }, 300); };
+  document.getElementById('nimp').onchange = e => { notesState.imp = e.target.checked; viewNotes(); };
+  document.getElementById('newnote').onclick = () => openNoteEditor(null, viewNotes);
+  document.getElementById('tagman').onclick = () => openTagManager(viewNotes);
+  const tc = document.getElementById('tagclear'); if (tc) tc.onclick = () => { notesState.tags = []; viewNotes(); };
+  $app.onclick = async e => {
+    const el = e.target.closest('[data-tagfilter],[data-nedit],[data-ndel]');
+    if (!el) return;
+    if (el.dataset.tagfilter) {
+      const tg = el.dataset.tagfilter;
+      notesState.tags = notesState.tags.includes(tg) ? notesState.tags.filter(x => x !== tg) : [...notesState.tags, tg];
+      viewNotes();
+    } else if (el.dataset.nedit) {
+      const n = await api.get('notes/' + el.dataset.nedit); openNoteEditor(n, viewNotes);
+    } else if (el.dataset.ndel) {
+      const n = notes.find(x => x.id === +el.dataset.ndel);
+      if (confirm(`注意点「${n ? n.data.title : ''}」を削除しますか？（元に戻せません）`)) { await api.send('DELETE', 'notes/' + el.dataset.ndel); viewNotes(); }
+    }
+  };
+  const sig = JSON.stringify(notes.map(n => [n.id, n.updated]));
+  pollFn = sameView(async () => {
+    if (document.querySelector('.modal-bg')) return;
+    const n2 = await quietGet('notes');
+    if (JSON.stringify(n2.map(n => [n.id, n.updated])) !== sig) await rerenderKeepScroll(viewNotes);
+  });
+}
+
 // ============================================================
 // 各画面
 // ============================================================
@@ -1081,6 +1363,7 @@ const routes = [
   [/^#\/records$/, viewRecords],
   [/^#\/print\/(\d+)$/, viewPrint],
   [/^#\/help$/, viewHelp],
+  [/^#\/notes$/, viewNotes],
 ];
 let currentHash = location.hash;
 // 開いている画面を8秒ごとに確認し、他の人の保存やツールの更新を反映する
@@ -1187,12 +1470,18 @@ async function viewProtocolEdit(id) {
   $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
       <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
       <a class="btn" href="#/protocols">一覧へ戻る</a> <button class="primary" id="save">保存</button></div></div>
-    <div class="split"><div id="ed"></div><div class="preview-wrap"><div class="legend">印刷イメージ（幅17cm）　<span class="sw" style="background:#d9d9d9">灰色</span>＝可変欄　赤い横線＝ページの区切り（目安）</div><div id="pv"></div></div></div>`;
+    <div class="split"><div><div id="np"></div><div id="ed"></div></div><div class="preview-wrap"><div class="legend">印刷イメージ（幅17cm）　<span class="sw" style="background:#d9d9d9">灰色</span>＝可変欄　赤い横線＝ページの区切り（目安）</div><div id="pv"></div></div></div>`;
   const pv = document.getElementById('pv');
   const chem = document.getElementById('chem');
   const draw = () => { pv.innerHTML = renderDoc(doc, { mode: 'preview', memo: true, chem: chem.checked }); };
   let t;
-  mountEditor(document.getElementById('ed'), doc, () => { dirty = true; clearTimeout(t); t = setTimeout(draw, 250); });
+  const onCh = () => { dirty = true; clearTimeout(t); t = setTimeout(draw, 250); };
+  const np = document.getElementById('np');
+  let ed;
+  const panel = tags => notesPanel(np, tags, ns => { insertNotesIntoDoc(doc, ns); ed.render(); onCh(); }, { label: 'このプロトコルのタグに合う注意点', target: 'このプロトコル' });
+  ed = mountEditor(document.getElementById('ed'), doc, onCh, { onTags: panel });
+  panel(doc.tags || []);
+  refreshTagList();
   chem.onchange = draw;
   draw();
   if (imported) { dirty = true; showBanner('data', '取り込んだ内容です。右の印刷イメージを見ながら直して、最後に「保存」を押してください（まだ保存されていません）。'); }
@@ -1213,7 +1502,7 @@ async function viewNewRecord(pid) {
   const p = await api.get('protocols/' + pid);
   const pd = p.data;
   const rec = {
-    protocol_id: p.id, protocol_name: pd.name, exp_date: today(),
+    protocol_id: p.id, protocol_name: pd.name, exp_date: today(), tags: clone(pd.tags || []),
     doc: { title: pd.title, blocks: clone(pd.blocks), memo: clone(pd.memo || { text: '', print: false }) },
     opts: { chem: true, memo: !!(pd.memo && pd.memo.print), date: true, cut: true },
   };
@@ -1238,9 +1527,14 @@ function recordEditor(rec, id, base) {
         <label><input type="checkbox" id="o-cut" ${rec.opts.cut ? 'checked' : ''}> 切り取り線（17×27cm）</label>
         <span class="muted" id="blanks"></span></div>
       <div class="tabs"><button data-tab="fill" class="on">入力（黄色の欄だけ）</button><button data-tab="edit">全体を編集</button></div></div>
-    <div id="body"></div>`;
+    <div id="np"></div><div id="body"></div>`;
   const body = document.getElementById('body');
   const doc = rec.doc;
+  (async () => {
+    let tags = rec.tags;
+    if (!tags && rec.protocol_id) { try { tags = ((await quietGet('protocols/' + rec.protocol_id)).data.tags) || []; } catch (e) { tags = []; } }
+    notesPanel(document.getElementById('np'), tags || [], ns => { insertNotesIntoDoc(doc, ns); dirty = true; redraw(); upd(); });
+  })();
   const upd = () => { const n = countBlanks(doc); document.getElementById('blanks').textContent = n ? `未入力の可変欄：${n}個` : '可変欄はすべて入力済み'; };
   const drawFill = () => {
     body.innerHTML = `<div class="legend">黄色の欄に入力してください（Tabキーで次の欄へ）。空欄のまま印刷すると、手書き用の灰色の空欄になります。</div>${renderDoc(doc, { mode: 'fill', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}`;

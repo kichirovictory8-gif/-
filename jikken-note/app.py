@@ -154,6 +154,12 @@ def init_db():
             updated TEXT NOT NULL,
             printed TEXT
         );
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            created TEXT NOT NULL,
+            updated TEXT NOT NULL
+        );
         """
     )
     seed_protocols = []
@@ -355,6 +361,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(out)
                 r = con.execute("SELECT * FROM records WHERE id=?", (int(p[2]),)).fetchone()
                 return self.send_json(row_record(r)) if r else self.send_json({"error": "not found"}, 404)
+            if p[1] == "notes":
+                if len(p) == 2:
+                    rows = con.execute("SELECT * FROM notes ORDER BY id DESC").fetchall()
+                    return self.send_json([{"id": r["id"], "updated": r["updated"], "data": json.loads(r["data"])} for r in rows])
+                r = con.execute("SELECT * FROM notes WHERE id=?", (int(p[2]),)).fetchone()
+                if not r:
+                    return self.send_json({"error": "見つかりません（削除された可能性があります）"}, 404)
+                return self.send_json({"id": r["id"], "updated": r["updated"], "data": json.loads(r["data"])})
+            if p[1] == "tags":
+                # 注意点・プロトコルで使われているタグと件数
+                cnt = {}
+                for table, key in (("notes", "n"), ("protocols", "p")):
+                    for r in con.execute(f"SELECT data FROM {table}").fetchall():
+                        for t in set(json.loads(r["data"]).get("tags") or []):
+                            cnt.setdefault(t, {"n": 0, "p": 0})[key] += 1
+                return self.send_json([{"tag": t, "notes": c["n"], "protocols": c["p"]} for t, c in sorted(cnt.items())])
             if p[1] == "info":
                 return self.send_json({"db": DB_PATH, "backup_dir": BACKUP_DIR, "share": SHARE,
                                        "local": self.is_local(), "password": bool(PASSWORD), "version": app_version(),
@@ -384,6 +406,32 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # noqa
                     return self.send_json({"error": "Word ファイルを読み取れませんでした: " + str(e)}, 400)
                 return self.send_json({"items": items})
+            if p[1] == "notes" and len(p) == 2:
+                cur = con.execute("INSERT INTO notes(data, created, updated) VALUES (?,?,?)",
+                                  (json.dumps(body["data"], ensure_ascii=False), now(), now()))
+                con.commit()
+                return self.send_json({"id": cur.lastrowid})
+            if p[1:] == ["tags", "rename"]:
+                # タグの名前を変える（to が空なら削除）。注意点・プロトコル・記録のすべてに反映
+                old, new = str(body.get("from", "")).strip(), str(body.get("to", "")).strip().lstrip("#＃").strip()
+                changed = 0
+                for table in ("notes", "protocols", "records"):
+                    for r in con.execute(f"SELECT id, data FROM {table}").fetchall():
+                        d = json.loads(r["data"])
+                        tags = d.get("tags") or []
+                        if old not in tags:
+                            continue
+                        out = []
+                        for t in tags:
+                            t = new if t == old else t
+                            if t and t not in out:
+                                out.append(t)
+                        d["tags"] = out
+                        con.execute(f"UPDATE {table} SET data=?, updated=? WHERE id=?",
+                                    (json.dumps(d, ensure_ascii=False), now(), r["id"]))
+                        changed += 1
+                con.commit()
+                return self.send_json({"ok": True, "changed": changed})
             if p[1:] == ["backup"]:
                 if not self.is_local():
                     return self.send_json({"error": "バックアップはツールを起動しているPCで行ってください"}, 403)
@@ -455,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
             con = connect()
             body = self.read_json()
             data = body["data"]
-            table = {"protocols": "protocols", "records": "records"}[p[1]]
+            table = {"protocols": "protocols", "records": "records", "notes": "notes"}[p[1]]
             cur = con.execute(f"SELECT updated FROM {table} WHERE id=?", (int(p[2]),)).fetchone()
             if cur is None:
                 return self.send_json({"error": "見つかりません（削除された可能性があります）"}, 404)
@@ -469,6 +517,9 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("UPDATE records SET protocol_name=?, exp_date=?, data=?, updated=? WHERE id=?",
                             (data.get("protocol_name", ""), data.get("exp_date", ""),
                              json.dumps(data, ensure_ascii=False), now(), int(p[2])))
+            elif p[1] == "notes":
+                con.execute("UPDATE notes SET data=?, updated=? WHERE id=?",
+                            (json.dumps(data, ensure_ascii=False), now(), int(p[2])))
             con.commit()
             new = con.execute(f"SELECT updated FROM {table} WHERE id=?", (int(p[2]),)).fetchone()["updated"]
             self.send_json({"ok": True, "updated": new})
@@ -481,7 +532,7 @@ class Handler(BaseHTTPRequestHandler):
         u, p = self.parts()
         try:
             con = connect()
-            table = {"protocols": "protocols", "records": "records"}[p[1]]
+            table = {"protocols": "protocols", "records": "records", "notes": "notes"}[p[1]]
             con.execute(f"DELETE FROM {table} WHERE id=?", (int(p[2]),))
             con.commit()
             self.send_json({"ok": True})

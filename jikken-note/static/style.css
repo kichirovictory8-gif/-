@@ -190,6 +190,30 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .gel-prev .mh::before { content: ""; position: absolute; top: 5px; left: 0; right: 0; border-top: 2px dashed #ff9d2e; }
 .gel-prev .mh span { position: absolute; left: 2px; top: -9px; background: #ff9d2e; color: #fff; font-size: 11px; padding: 0 3px; border-radius: 2px; }
 
+
+/* ===== 注意点・タグ ===== */
+.tagchip { display: inline-block; background: #e8f0fa; color: #1f3b5c; border: 1px solid #b9cce3; border-radius: 12px; padding: 0 8px; margin: 1px 3px 1px 0; font-size: 12px; line-height: 1.6; font-family: var(--ui); white-space: nowrap; }
+.tagchip[data-tagfilter] { cursor: pointer; }
+.tagchip.big { font-size: 13px; padding: 2px 10px; }
+.tagchip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tagchip small { opacity: .7; }
+.tagchip .tx { border: none; background: none; padding: 0 0 0 4px; font-size: 12px; cursor: pointer; color: #6b7785; }
+.tagbox { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; border: 1px solid #b5bfca; border-radius: 4px; padding: 2px 4px; background: #fff; min-width: 300px; }
+.tagbox .taginp { border: none !important; outline: none; min-width: 140px; flex: 1; padding: 3px 2px !important; }
+.tagrow { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.notecard { background: #fff; border: 1px solid var(--line); border-left: 4px solid #9fb4cc; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+.notecard.imp { border-left-color: #e00000; }
+.nc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nc-star { color: #e00000; font-weight: bold; font-size: 12px; }
+.nc-title { font-weight: bold; font-family: var(--mincho); font-size: 15px; }
+.sheet.notebody { width: auto; box-shadow: none; background: none; padding: 2px 0 0; min-height: 0; font-size: 10.5pt; }
+.notes-panel { background: #fffbe6; border: 1px solid #e8d48a; border-radius: 8px; padding: 8px 12px; margin: 0 0 12px; }
+.notes-panel.empty { background: #f7f9fb; border-color: var(--line); color: #6b7785; font-size: 13px; }
+.notes-panel summary { cursor: pointer; font-weight: bold; color: #7a5b00; }
+.np-list { margin: 8px 0; max-height: 420px; overflow: auto; }
+.ne-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }
+.ne-grid #ne-pv { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; min-height: 200px; background: #fff; }
+
 /* ===== 印刷 ===== */
 @page { size: A4 portrait; margin: 13.5mm 20mm; }
 @media print {

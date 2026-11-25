@@ -1414,18 +1414,18 @@ async function viewHome() {
       <ul>${info.addresses.map(a => `<li><code>${esc(a)}</code></li>`).join('')}</ul>` : '<p>このPCは、ツールを起動しているPCに接続しています。</p>'}
       <p><a class="btn" href="/shortcut.url" download>このPC用のアイコン（ショートカット）をダウンロード</a>
       <span class="muted">ダウンロードした「実験ノート印刷.url」をデスクトップに移すと、ダブルクリックで開けます。</span></p></div>` : '';
-  $app.innerHTML = `
+  $app.innerHTML = `<div class="home">
     <h2>実験ノート印刷</h2>
     ${info.warn ? `<div class="card" style="background:#fff4ce;border-color:#e0c060"><b>置き場所の注意：</b>${esc(info.warn)}<div class="muted">移すときはツールを終了してから jikken-note フォルダごと移動し、「デスクトップにアイコンを作る.bat」をもう一度実行してください。</div></div>` : ''}
     <div class="card"><h3 style="margin-top:0">新しい記録を書く</h3>
-      <div class="row"><select id="psel" style="min-width:320px;font-size:16px;padding:8px">${ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <div class="row"><select id="psel" class="psel">${ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
       <button class="primary big" id="start">このプロトコルで書く</button></div>
       <p class="muted">プロトコルを選ぶと内容がそのまま入ります。黄色の欄（可変欄）だけ入力すれば印刷できます。</p></div>
     <div class="card"><div class="row"><h3 style="margin:0">最近の記録</h3><span class="spacer"></span><a href="#/records">すべて見る →</a></div>
-      ${rs.length ? `<table class="list"><tr><th>実験日</th><th>プロトコル</th><th>印刷</th><th></th></tr>${rs.slice(0, 8).map(r => `<tr><td>${esc(r.exp_date)}</td><td>${esc(r.protocol_name)}</td><td class="muted">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td><td><a href="#/record/${r.id}">開く</a> ・ <a href="#/print/${r.id}">印刷</a></td></tr>`).join('')}</table>` : '<p class="muted">まだ記録はありません。</p>'}</div>
+      ${rs.length ? `<div class="tablewrap"><table class="list"><tr><th>実験日</th><th>プロトコル</th><th>印刷</th><th></th></tr>${rs.slice(0, 8).map(r => `<tr><td class="nowrap">${esc(r.exp_date)}</td><td>${esc(r.protocol_name)}</td><td class="muted nowrap">${r.printed ? esc(r.printed.slice(0, 16)) : '未印刷'}</td><td class="nowrap"><a href="#/record/${r.id}">開く</a> ・ <a href="#/print/${r.id}">印刷</a></td></tr>`).join('')}</table></div>` : '<p class="muted">まだ記録はありません。</p>'}</div>
     ${shareCard}
     ${info.local ? `<div class="card"><div class="row"><h3 style="margin:0">バックアップ</h3><span class="spacer"></span><button id="bk">今すぐバックアップ</button></div>
-      <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>` : ''}`;
+      <p class="muted">データはすべて <code>data\\notebook.db</code> の1ファイルに入っています。このボタンを押すと <code>backup</code> フォルダに日時つきのコピーを作ります（起動時にも1日1回、自動でコピーします）。</p></div>` : ''}</div>`;
   document.getElementById('start').onclick = () => go('#/new/' + document.getElementById('psel').value);
   if (info.local) document.getElementById('bk').onclick = async () => { const r = await api.send('POST', 'backup'); toast('バックアップしました'); alert('バックアップを作成しました：\n' + r.path); };
   const sig = JSON.stringify([ps, rs]);

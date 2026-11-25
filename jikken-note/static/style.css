@@ -7,7 +7,7 @@
   --line: #ccd3db;
 }
 * { box-sizing: border-box; }
-body { margin: 0; font-family: var(--ui); font-size: 14px; color: #222; background: #eef1f4; }
+body { margin: 0; font-family: var(--ui); font-size: 15px; overflow-wrap: anywhere; color: #222; background: #eef1f4; }
 a { color: var(--accent); }
 .topbar { display: flex; align-items: center; gap: 24px; padding: 10px 20px; background: #1f3b5c; color: #fff; position: sticky; top: 0; z-index: 20; }
 .topbar a { color: #fff; text-decoration: none; }
@@ -44,6 +44,16 @@ table.list tr:hover td { background: #fafcff; }
 .imgdrop { border: 2px dashed #9fb4cc; background: #f7fbff; border-radius: 6px; padding: 10px; margin-bottom: 6px; text-align: center; color: #5a6b7d; display: flex; align-items: center; gap: 10px; justify-content: center; min-height: 54px; }
 .imgdrop img { max-height: 60px; max-width: 140px; }
 .imgdrop.over { background: #dcebff; border-color: var(--accent); }
+/* ホーム画面：中央に読みやすい幅でまとめる */
+.home { max-width: 980px; margin: 0 auto; }
+.home h2 { font-size: 24px; }
+.home h3 { font-size: 17px; }
+.home .psel { flex: 1 1 320px; min-width: 0; max-width: 100%; font-size: 17px; padding: 9px; }
+.home .row > .btn, .home .row > button { flex: none; }
+.tablewrap { overflow-x: auto; max-width: 100%; }
+td.nowrap, th.nowrap { white-space: nowrap; }
+table.list td { overflow-wrap: anywhere; }
+main { min-width: 0; }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #263238; color: #fff; padding: 10px 18px; border-radius: 6px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 50; }
 #toast.show { opacity: .95; }
 .toolbar { position: sticky; top: 46px; z-index: 10; background: #eef1f4; padding: 8px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }

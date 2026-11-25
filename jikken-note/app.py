@@ -7,7 +7,10 @@ Python に最初から入っている機能だけで動きます（追加イン�
 起動すると自動でブラウザが開きます。この黒い画面を閉じると終了します。
 """
 import base64
+import hashlib
+import hmac
 import json
+import secrets
 import os
 import socket
 import shutil
@@ -29,6 +32,39 @@ STATIC = os.path.join(BASE, "static")
 DATA_DIR = os.path.join(BASE, "data")
 DB_PATH = os.path.join(DATA_DIR, "notebook.db")
 PASSWORD_FILE = os.path.join(DATA_DIR, "password.txt")
+SECRET_FILE = os.path.join(DATA_DIR, "secret.txt")
+COOKIE = "jn_auth"
+
+LOGIN_HTML = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>実験ノート印刷</title>
+<link rel="icon" href="/icon.ico"><style>
+body{margin:0;font-family:"Yu Gothic UI","Meiryo",system-ui,sans-serif;background:#eef1f4;color:#222}
+.box{max-width:380px;margin:12vh auto;background:#fff;border:1px solid #ccd3db;border-radius:10px;padding:28px 26px;text-align:center}
+h1{font-size:20px;margin:10px 0 6px}p{font-size:14px;color:#555;margin:0 0 16px}
+input{font:inherit;font-size:18px;width:100%;box-sizing:border-box;padding:10px;border:1px solid #9aa7b4;border-radius:6px}
+button{font:inherit;font-size:16px;margin-top:14px;width:100%;padding:10px;border:none;border-radius:6px;background:#1f5fa8;color:#fff;cursor:pointer}
+.err{color:#b00020;font-size:14px;min-height:1.4em;margin-top:10px}.note{font-size:12px;color:#888;margin-top:18px;text-align:left}
+</style></head><body><form class="box" id="f">
+<img src="/icon.png" width="56" height="56" alt=""><h1>実験ノート印刷</h1>
+<p>合言葉を入力してください</p>
+<input type="password" id="pw" autocomplete="current-password" autofocus>
+<button type="submit">開く</button><div class="err" id="err"></div>
+<div class="note">合言葉は、このツールを管理している人に聞いてください。<br>一度入力すると、このPCでは30日間入力不要です。</div>
+</form><script>
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();
+ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+ if(r.ok){location.reload();}else{document.getElementById('err').textContent='合言葉が違います（全角・半角、大文字・小文字も確認してください）';}};
+</script></body></html>"""
+
+
+def auth_token():
+    """合言葉から作る確認用の値（合言葉そのものはブラウザに保存しない）"""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if not os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "w", encoding="utf-8") as f:
+            f.write(secrets.token_hex(32))
+    key = open(SECRET_FILE, encoding="utf-8").read().strip().encode()
+    return hmac.new(key, PASSWORD.encode("utf-8"), hashlib.sha256).hexdigest()
 BACKUP_DIR = os.path.join(BASE, "backup")
 AUTO_BACKUP_KEEP = 14
 
@@ -223,26 +259,54 @@ class Handler(BaseHTTPRequestHandler):
     def is_local(self):
         return self.client_address[0] in ("127.0.0.1", "::1")
 
-    def auth_ok(self):
-        """共有モードで合言葉が設定されているとき、他のPCからの接続には合言葉を求める"""
+    def authed(self):
         if not PASSWORD or self.is_local():
             return True
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE and hmac.compare_digest(v, auth_token()):
+                return True
         h = self.headers.get("Authorization", "")
         if h.startswith("Basic "):
             try:
-                user_pass = base64.b64decode(h[6:]).decode("utf-8")
-                if user_pass.split(":", 1)[1] == PASSWORD:
+                if base64.b64decode(h[6:]).decode("utf-8").split(":", 1)[1] == PASSWORD:
                     return True
             except Exception:
                 pass
-        body = "合言葉が必要です".encode("utf-8")
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="jikken-note", charset="UTF-8"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        return False
+
+    def auth_ok(self):
+        """共有モードで合言葉が設定されているとき、他のPCからの接続には合言葉を求める（ツール独自の入力画面）"""
+        if self.authed():
+            return True
+        path = urlparse(self.path).path
+        if self.command == "GET" and path in ("/icon.png", "/icon.ico"):
+            self.serve_static(path)
+            return False
+        if path.startswith("/api/"):
+            self.send_json({"error": "合言葉を入力し直してください（ページを再読み込みします）", "login": True}, 401)
+            return False
+        body = LOGIN_HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
         return False
+
+    def login(self):
+        body = self.read_json()
+        if PASSWORD and hmac.compare_digest(str(body.get("password", "")).strip(), PASSWORD):
+            out = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Set-Cookie", f"{COOKIE}={auth_token()}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+        else:
+            self.send_json({"error": "合言葉が違います"}, 403)
 
     def shortcut(self):
         host = self.headers.get("Host") or f"{HOST}:{PORT}"
@@ -300,6 +364,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(e)}, 500)
 
     def do_POST(self):
+        if urlparse(self.path).path == "/api/login":
+            return self.login()
         if not self.auth_ok():
             return
         u, p = self.parts()

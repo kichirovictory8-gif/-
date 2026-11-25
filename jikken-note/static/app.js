@@ -13,6 +13,7 @@ async function req(method, u, body) {
   } catch (e) { alert(NO_SERVER); throw e; }
   let j;
   try { j = await r.json(); } catch (e) { alert('サーバから予期しない応答がありました（' + r.status + '）。保存されていない可能性があります。'); throw e; }
+  if (j && j.login) { alert(j.error + (dirty ? '\n（入力中の内容は保存されていません）' : '')); dirty = false; location.reload(); throw new Error('login'); }
   if (j && j.error) { alert('保存・読み込みに失敗しました: ' + j.error); throw new Error(j.error); }
   return j;
 }
@@ -1126,7 +1127,7 @@ function go(h) { location.hash = h; }
 async function viewHome() {
   const [ps, rs, info] = await Promise.all([api.get('protocols'), api.get('records'), api.get('info')]);
   const shareCard = info.share ? `<div class="card"><h3 style="margin-top:0">他のPCから開く（共有モードで起動中）</h3>
-      ${info.local ? `<p>同じ研究室のネットワークにつながったPCのブラウザで、次のどれかを開いてください（合言葉：${info.password ? 'あり。ユーザー名は空欄か何でもよく、パスワード欄に合言葉を入力' : 'なし'}）。</p>
+      ${info.local ? `<p>同じ研究室のネットワークにつながったPCのブラウザで、次のどれかを開いてください（合言葉：${info.password ? 'あり。開くと「合言葉を入力してください」という画面が出るので、合言葉を入れて「開く」' : 'なし'}）。</p>
       <ul>${info.addresses.map(a => `<li><code>${esc(a)}</code></li>`).join('')}</ul>` : '<p>このPCは、ツールを起動しているPCに接続しています。</p>'}
       <p><a class="btn" href="/shortcut.url" download>このPC用のアイコン（ショートカット）をダウンロード</a>
       <span class="muted">ダウンロードした「実験ノート印刷.url」をデスクトップに移すと、ダブルクリックで開けます。</span></p></div>` : '';

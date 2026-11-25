@@ -320,6 +320,7 @@ function renderDoc(doc, opts = {}) {
       case 'pcr': inner = renderPcr(b, bp, ctx); break;
       case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${+b.width || 100}%">` : ''; break;
       case 'tubes': inner = renderTubes(b, bp, ctx); break;
+      case 'pagebreak': inner = '<div class="pbreak"><span>改ページ（印刷ではここで次のページへ）</span></div>'; break;
       case 'gel': inner = renderGel(b, bp, ctx); break;
     }
     h += `<div class="block" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${inner}</div>`;
@@ -374,7 +375,7 @@ function openTaigen(text, onApply) {
 // ブロック編集画面（プロトコル編集・記録の「全体を編集」で共用）
 // ============================================================
 const BLOCK_TYPES = {
-  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像', tubes: 'チューブ配置図', gel: '泳動画像（レーン名）',
+  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像', tubes: 'チューブ配置図', gel: '泳動画像（レーン名）', pagebreak: '改ページ',
 };
 function newBlock(type) {
   switch (type) {
@@ -385,6 +386,7 @@ function newBlock(type) {
     case 'table': return { type, header_row: true, header_col: true, rows: [['', '', ''], ['', '', ''], ['', '', '']] };
     case 'pcr': return { type, label: 'PCR', steps: [{ t: '98℃', d: '30sec' }, { t: '98℃', d: '10sec' }, { t: '[[アニール温度]]℃', d: '5sec' }, { t: '72℃', d: '[[伸長時間]]' }, { t: '4℃', d: '∞' }], cyc_from: 1, cyc_to: 3, cyc_text: '×[[サイクル数=30]]サイクル' };
     case 'image': return { type, src: '', width: 100 };
+    case 'pagebreak': return { type };
     case 'tubes': return { type, label: '8連チューブ', count: 8, strip: true, legend: true, tubes: Array.from({ length: 8 }, (_, k) => ({ mark: String(k + 1), name: '', kind: 's', vol: '' })) };
     case 'gel': return { type, label: '電気泳動', note: '', src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
   }
@@ -503,6 +505,7 @@ function blockEditorHtml(b, i, n) {
         <button type="button" class="small" data-act="pcradd" data-path="${bp}.steps">＋ 段階を追加</button>`;
       break;
     case 'tubes': body = tubesEdHtml(b, bp); break;
+    case 'pagebreak': body = '<div class="muted">印刷するとき、ここで必ず次のページに送ります。それ以外の場所は、項目や画像の途中で切れないように自動で分けます。</div>'; break;
     case 'gel': body = gelEdHtml(b, bp); break;
     case 'image':
       body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（PNG・JPEG など）</span></div>
@@ -1365,6 +1368,132 @@ async function viewNotes() {
   });
 }
 
+
+// ============================================================
+// 印刷のページ分け（ツールが切れ目を計算して、1ページずつ組み立てる）
+//   ・「改ページ」ブロックでは必ず次のページへ
+//   ・それ以外は、まとまり（項目＋補足＋矢印、段落、表、画像、図）の途中では切らない
+//   ・見出しは次のまとまりと同じページに置く
+//   ・少し縮めればページ数が減るときは 85% まで縮める
+//   ・1ページより大きいまとまり（大きな画像など）は1ページに収まるよう縮める
+// ============================================================
+const PAGE = { w: 170, h: 269.5, padX: 3, padY: 2.5, minScale: 0.85, safety: 1.5 };   // mm
+function mmToPx(mm) {
+  const d = document.createElement('div');
+  d.style.cssText = `position:absolute;visibility:hidden;height:${mm}mm;width:1px`;
+  document.body.appendChild(d);
+  const px = d.getBoundingClientRect().height;
+  d.remove();
+  return px;
+}
+async function waitAssets(root) {
+  try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) { /* 無視 */ }
+  const imgs = [...root.querySelectorAll('img')];
+  await Promise.all(imgs.map(im => (im.complete && im.naturalWidth) ? 0 : new Promise(r => { im.onload = im.onerror = r; })));
+}
+// 書面を「まとまり」の並びに分ける
+function collectUnits(sheet) {
+  const units = [];
+  const wrapOpen = el => { const c = el.cloneNode(false); return c.outerHTML.replace(/<\/[a-z0-9]+>$/i, ''); };
+  const wrapClose = el => `</${el.tagName.toLowerCase()}>`;
+  for (const el of [...sheet.children]) {
+    if (el.classList.contains('date-line')) { units.push({ html: el.outerHTML }); continue; }
+    if (el.matches('h1.ptitle')) { units.push({ html: el.outerHTML, glue: true }); continue; }
+    if (el.classList.contains('block')) {
+      if (el.querySelector(':scope > .pbreak')) { units.push({ brk: true }); continue; }
+      if (el.querySelector(':scope > .blk-h, :scope > .h-sub')) { units.push({ html: el.outerHTML, glue: true }); continue; }
+      const kids = [...el.children];
+      if (kids.length && kids.every(k => k.classList.contains('keep') || k.classList.contains('gap'))) {
+        const o = wrapOpen(el), c = wrapClose(el);
+        for (const k of kids) units.push({ html: o + k.outerHTML + c, gap: k.classList.contains('gap') });
+        continue;
+      }
+      if (!el.innerHTML.trim()) continue;
+      units.push({ html: el.outerHTML });
+      continue;
+    }
+    if (el.classList.contains('memo')) {
+      const kids = [...el.children];
+      kids.forEach((k, i) => {
+        if (k.classList.contains('memo-h')) units.push({ html: `<div class="memo">${k.outerHTML}</div>`, glue: true });
+        else units.push({ html: `<div class="memo-cont">${k.outerHTML}</div>`, gap: k.classList.contains('gap') });
+      });
+      continue;
+    }
+    units.push({ html: el.outerHTML });
+  }
+  return units;
+}
+// まとまりの高さを測る（実際と同じ幅・同じ文字・同じ倍率で並べて測る）
+// 倍率 s では、まとまりごとに zoom をかける（横幅いっぱいの画像は縮まないので、倍率ごとに測り直す）
+async function measureAt(units, s) {
+  const box = document.createElement('div');
+  box.className = 'sheet measure';
+  box.style.cssText = `position:absolute;left:-10000px;top:0;width:${PAGE.w - PAGE.padX * 2}mm;padding:0;box-shadow:none;background:none;min-height:0`;
+  box.innerHTML = units.map(u => `<i class="mk"></i><div class="mu" style="zoom:${s}">${u.html}</div>`).join('') + '<i class="mk"></i>';
+  document.body.appendChild(box);
+  await waitAssets(box);
+  const tops = [...box.querySelectorAll(':scope > .mk')].map(m => m.getBoundingClientRect().top);
+  box.remove();
+  return units.map((u, i) => tops[i + 1] - tops[i]);
+}
+// 決められた高さ cap（px）でページに詰める（hs: それぞれの高さ）
+function packPages(units, hs, cap) {
+  const pages = [[]];
+  let h = 0;
+  for (let i = 0; i < units.length; i++) {
+    const u = units[i];
+    const cur = pages[pages.length - 1];
+    if (u.gap && !cur.length) continue;              // ページの先頭の空行は捨てる
+    // 見出しは、次のまとまりと一緒に入るかで判断する
+    let need = Math.min(hs[i], cap), j = i;
+    while (units[j] && units[j].glue && j + 1 < units.length) { j++; need += Math.min(hs[j], cap); }
+    if (h > 0 && h + need > cap) { pages.push([]); h = 0; if (u.gap) continue; }
+    pages[pages.length - 1].push(i);
+    h += Math.min(hs[i], cap);
+  }
+  if (!pages[pages.length - 1].length && pages.length > 1) pages.pop();
+  return pages;
+}
+async function paginateHtml(doc, opts) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderDoc(doc, opts);
+  const units = collectUnits(tmp.firstElementChild);
+  const cap = mmToPx(PAGE.h - PAGE.padY * 2 - PAGE.safety);
+  // 「改ページ」ごとの区切りに分け、それぞれで「縮めるとページが減るか」を調べる
+  const segs = [[]];
+  for (const u of units) { if (u.brk) segs.push([]); else segs[segs.length - 1].push(u); }
+  const out = [];
+  for (const seg of segs) {
+    if (!seg.length) continue;
+    const hs1 = await measureAt(seg, 1);
+    let best = { s: 1, hs: hs1, pages: packPages(seg, hs1, cap) };
+    if (best.pages.length > 1) {
+      // 縮めてページが減るなら、減らせる中でいちばん大きい倍率を選ぶ
+      const hsMin = await measureAt(seg, PAGE.minScale);
+      const target = packPages(seg, hsMin, cap).length;
+      if (target < best.pages.length) {
+        for (let k = 99; k >= PAGE.minScale * 100; k--) {
+          const sc = k / 100;
+          const hs = sc === PAGE.minScale ? hsMin : await measureAt(seg, sc);
+          const pg = packPages(seg, hs, cap);
+          if (pg.length === target) { best = { s: sc, hs, pages: pg }; break; }
+        }
+      }
+    }
+    for (const pg of best.pages) out.push({ s: best.s, items: pg.map(i => ({ u: seg[i], h: best.hs[i] })) });
+  }
+  return out.map((p, i) => {
+    const inner = p.items.map(({ u, h }) => {
+      // 1ページより大きいもの（大きな画像など）は、1ページに収まるように縮める
+      const z = h > cap ? Math.max(0.3, Math.floor(p.s * cap / h * 100) / 100) : p.s;
+      return `<div class="mu" ${z < 1 ? `style="zoom:${z}"` : ''}>${u.html}</div>`;
+    }).join('');
+    return `<div class="page-label no-print">${i + 1} / ${out.length} ページ${p.s < 1 ? `（${Math.round(p.s * 100)}% に縮小）` : ''}</div>
+      <div class="page${opts.cut ? ' cut' : ''}"><div class="sheet page-in">${inner}</div></div>`;
+  }).join('');
+}
+
 // ============================================================
 // 各画面
 // ============================================================
@@ -1484,7 +1613,7 @@ async function viewProtocolEdit(id) {
   $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
       <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
       <a class="btn" href="#/protocols">一覧へ戻る</a> <button class="primary" id="save">保存</button></div></div>
-    <div class="split"><div><div id="np"></div><div id="ed"></div></div><div class="preview-wrap"><div class="legend">印刷イメージ（幅17cm）　<span class="sw" style="background:#d9d9d9">灰色</span>＝可変欄　赤い横線＝ページの区切り（目安）</div><div id="pv"></div></div></div>`;
+    <div class="split"><div><div id="np"></div><div id="ed"></div></div><div class="preview-wrap"><div class="legend">印刷イメージ（幅17cm）　<span class="sw" style="background:#d9d9d9">灰色</span>＝可変欄　※ページの分かれ方は「印刷プレビュー」で確認できます</div><div id="pv"></div></div></div>`;
   const pv = document.getElementById('pv');
   const chem = document.getElementById('chem');
   const draw = () => { pv.innerHTML = renderDoc(doc, { mode: 'preview', memo: true, chem: chem.checked }); };
@@ -1672,9 +1801,9 @@ async function viewPrint(id) {
   const rec = r.data;
   $app.innerHTML = `<div class="toolbar no-print"><div class="row"><h2 style="margin:0">印刷プレビュー</h2><span class="muted">${esc(rec.protocol_name)}　記録 No.${id}</span><span class="spacer"></span>
       <a class="btn" href="#/record/${id}">← 入力に戻る</a> <button class="primary big" id="pr">印刷する</button></div>
-      <div class="muted" style="margin-top:6px">印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。赤い横線はページの区切りの目安で、印刷はされません。</div></div>
-    ${renderDoc(rec.doc, { mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}
-    <div class="cutguide ${rec.opts.cut ? 'on' : ''}"></div>`;
+      <div class="muted" style="margin-top:6px">下の表示が、そのまま印刷されるページです。印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。切りたい場所を変えたいときは、プロトコルや記録に「改ページ」ブロックを入れてください。</div></div>
+    <div class="pages" id="pages"><div class="muted">ページを組み立て中…</div></div>`;
+  document.getElementById('pages').innerHTML = await paginateHtml(rec.doc, { mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false, cut: !!rec.opts.cut });
   document.getElementById('pr').onclick = () => window.print();
   pollFn = sameView(async () => { const r2 = await quietGet('records/' + id); if (r2.updated !== r.updated) await rerenderKeepScroll(() => viewPrint(id)); });
   window.onafterprint = async () => { if (location.hash === '#/print/' + id) { await api.send('POST', `records/${id}/printed`); toast('印刷日時を記録しました'); } };

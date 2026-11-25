@@ -94,7 +94,6 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
   width: 170mm; min-height: 60mm; padding: 3mm 3mm; background: #fff; color: #000;
   font-family: var(--mincho); font-size: 10.5pt; line-height: 1.6;
   box-shadow: 0 1px 6px rgba(0,0,0,.2);
-  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(270mm - 1px), #ff8a8a calc(270mm - 1px), #ff8a8a 270mm);
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
   word-break: break-all; overflow-wrap: anywhere;
 }
@@ -229,6 +228,18 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .ne-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }
 .ne-grid #ne-pv { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; min-height: 200px; background: #fff; }
 
+/* ===== ページ分け（印刷プレビューと印刷） ===== */
+.sheet .pbreak { position: relative; height: 0; border-top: 1px dashed #1f5fa8; margin: 4mm 0; text-align: center; }
+.sheet .pbreak span { position: relative; top: -0.75em; background: #fff; color: #1f5fa8; font-family: var(--ui); font-size: 11px; padding: 0 8px; }
+.pages { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.page-label { font-size: 12px; color: #555; margin-top: 10px; }
+.page { width: 170mm; height: 269.5mm; box-sizing: border-box; padding: 2.5mm 3mm; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.25); overflow: hidden; position: relative; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.page.cut { outline: 0.4pt dashed #9a9a9a; outline-offset: 0; }
+.page .sheet.page-in { width: auto; padding: 0; box-shadow: none; background: none; min-height: 0; }
+.sheet .memo-cont { }
+.sheet .mu { display: flow-root; }
+.sheet .mk { display: block; height: 0; }
+
 /* ===== 印刷 ===== */
 @page { size: A4 portrait; margin: 13.5mm 20mm; }
 @media print {
@@ -237,5 +248,9 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
   main { padding: 0; margin: 0; max-width: none; }
   .sheet { width: auto; box-shadow: none; background-image: none; padding: 2.5mm 3mm; }
   .sheet .vf.blank .lbl { display: none; }
+  .pages { display: block; }
+  .page { box-shadow: none; break-after: page; page-break-after: always; margin: 0; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .page .sheet.page-in { padding: 0 !important; width: auto !important; }
   .cutguide.on { display: block; position: fixed; inset: 0; border: 0.4pt dashed #9a9a9a; pointer-events: none; }
 }

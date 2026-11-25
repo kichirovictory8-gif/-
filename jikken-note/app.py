@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import unicodedata
 import os
 import socket
 import shutil
@@ -297,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def login(self):
         body = self.read_json()
-        if PASSWORD and hmac.compare_digest(str(body.get("password", "")).strip(), PASSWORD):
+        if PASSWORD and hmac.compare_digest(norm_pw(body.get("password", "")), PASSWORD):
             out = b'{"ok": true}'
             self.send_response(200)
             self.send_header("Set-Cookie", f"{COOKIE}={auth_token()}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax")
@@ -496,21 +497,38 @@ def already_running():
         return False
 
 
+def norm_pw(s):
+    """全角の英数字は半角にそろえる（ｋｋｋ → kkk）"""
+    return unicodedata.normalize("NFKC", str(s or "")).strip()
+
+
+def pw_ok(s):
+    return all(" " < ch <= "~" for ch in s)
+
+
 def setup_password():
     global PASSWORD
     if os.path.exists(PASSWORD_FILE):
-        PASSWORD = open(PASSWORD_FILE, encoding="utf-8").read().strip()
+        # メモ帳で保存したときに付く BOM も取り除く
+        PASSWORD = norm_pw(open(PASSWORD_FILE, encoding="utf-8-sig").read())
+        if PASSWORD and not pw_ok(PASSWORD):
+            print("【注意】合言葉に日本語や空白が入っています。ブラウザの合言葉の欄では日本語を入力できないので、")
+            print("　　　　data\\password.txt を半角英数字の合言葉に書き換えて、起動し直してください。")
         return
     print("共有モードを初めて使います。")
-    print("他のPCから開くときに入力する「合言葉」を決めてください。")
+    print("他のPCから開くときに入力する「合言葉」を決めてください（半角の英数字。例：orc2lab25）。")
     print("（何も入力せずに Enter を押すと合言葉なしになります。研究室外の人も開ける可能性があるので、設定をおすすめします）")
-    try:
-        PASSWORD = input("合言葉: ").strip()
-    except EOFError:
-        PASSWORD = ""
+    while True:
+        try:
+            PASSWORD = norm_pw(input("合言葉: "))
+        except EOFError:
+            PASSWORD = ""
+        if pw_ok(PASSWORD):
+            break
+        print("日本語や空白は使えません（ブラウザの合言葉の欄では日本語を入力できないため）。半角の英数字で入力してください。")
     with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
         f.write(PASSWORD)
-    print("合言葉を保存しました（変えるときは data\\password.txt を消して起動し直す）")
+    print("合言葉を保存しました（変えるときは data\\password.txt をメモ帳で書き換えるか、消して起動し直す）")
 
 
 def main():

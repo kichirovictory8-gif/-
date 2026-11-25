@@ -304,6 +304,8 @@ function renderDoc(doc, opts = {}) {
       case 'table': inner = renderTable(b, bp, ctx); break;
       case 'pcr': inner = renderPcr(b, bp, ctx); break;
       case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${+b.width || 100}%">` : ''; break;
+      case 'tubes': inner = renderTubes(b, bp, ctx); break;
+      case 'gel': inner = renderGel(b, bp, ctx); break;
     }
     h += `<div class="block" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${inner}</div>`;
   });
@@ -357,7 +359,7 @@ function openTaigen(text, onApply) {
 // ブロック編集画面（プロトコル編集・記録の「全体を編集」で共用）
 // ============================================================
 const BLOCK_TYPES = {
-  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像',
+  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像', tubes: 'チューブ配置図', gel: '泳動画像（レーン名）',
 };
 function newBlock(type) {
   switch (type) {
@@ -368,6 +370,8 @@ function newBlock(type) {
     case 'table': return { type, header_row: true, header_col: true, rows: [['', '', ''], ['', '', ''], ['', '', '']] };
     case 'pcr': return { type, label: 'PCR', steps: [{ t: '98℃', d: '30sec' }, { t: '98℃', d: '10sec' }, { t: '[[アニール温度]]℃', d: '5sec' }, { t: '72℃', d: '[[伸長時間]]' }, { t: '4℃', d: '∞' }], cyc_from: 1, cyc_to: 3, cyc_text: '×[[サイクル数=30]]サイクル' };
     case 'image': return { type, src: '', width: 100 };
+    case 'tubes': return { type, label: '8連チューブ', count: 8, strip: true, legend: true, tubes: Array.from({ length: 8 }, (_, k) => ({ mark: String(k + 1), name: '', kind: 's', vol: '' })) };
+    case 'gel': return { type, label: '電気泳動', note: '', src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
   }
 }
 let lastField = null;
@@ -483,6 +487,8 @@ function blockEditorHtml(b, i, n) {
         <td><button type="button" class="small" data-act="rowup" data-path="${bp}.steps" data-j="${j}">↑</button><button type="button" class="small" data-act="rowdel" data-path="${bp}.steps" data-j="${j}">×</button></td></tr>`).join('')}</table>
         <button type="button" class="small" data-act="pcradd" data-path="${bp}.steps">＋ 段階を追加</button>`;
       break;
+    case 'tubes': body = tubesEdHtml(b, bp); break;
+    case 'gel': body = gelEdHtml(b, bp); break;
     case 'image':
       body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（PNG・JPEG など）</span></div>
         <div class="row"><input type="file" accept="image/*" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
@@ -510,19 +516,21 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
         ${ta('memo.text', (doc.memo || {}).text, 4)}
         <label><input type="checkbox" data-bind="memo.print" ${(doc.memo || {}).print ? 'checked' : ''}> 最初から「メモも印刷」にしておく</label></div>`;
     bindMarkupBar(el);
+    bindGelDrag(el, doc, () => { render(); onChange(); });
   };
   if (!doc.memo) doc.memo = { text: '', print: false };
   render();
   el.oninput = el.onchange = e => {
     const t = e.target;
     if (!t.dataset.bind) return;
-    let v = t.type === 'checkbox' ? t.checked : t.value;
-    if (t.dataset.num && v !== '') v = +v;
-    setPath(doc, t.dataset.bind, v);
-    if (e.type === 'change' && (t.tagName === 'SELECT')) render();
+    applyBind(doc, t);
+    if (t.dataset.live) { refreshGelPreview(el, doc, t); bindGelDrag(el, doc, () => { render(); onChange(); }); }
+    if (e.type === 'change' && (t.tagName === 'SELECT' || t.dataset.resize || t.dataset.live)) render();
     onChange();
   };
   el.onclick = e => {
+    const f = e.target.closest('[data-fig]');
+    if (f) { if (figAction(doc, f)) { render(); onChange(); } return; }
     const t = e.target.closest('[data-act]');
     if (!t || t.type === 'file') return;
     const a = t.dataset.act, i = +t.dataset.i;
@@ -544,12 +552,7 @@ function mountEditor(el, doc, onChange, { withMeta = true } = {}) {
     else return;
     render(); onChange();
   };
-  const setImage = (i, file) => {
-    if (!/^image\//.test(file.type)) { alert('画像ファイル（PNG・JPEG など）を選んでください。'); return; }
-    const fr = new FileReader();
-    fr.onload = () => { doc.blocks[i].src = fr.result; render(); onChange(); };
-    fr.readAsDataURL(file);
-  };
+  const setImage = makeImageSetter(doc, () => { render(); onChange(); });
   imageDropHandler = setImage;
   el.addEventListener('change', e => {
     const t = e.target;
@@ -853,6 +856,218 @@ let imageDropHandler = null;
   });
 })();
 
+
+// ============================================================
+// 図：チューブ配置図（PCRの8連チューブなど）・泳動画像（レーン名つき）
+// ============================================================
+const TUBE_KINDS = { s: ['サンプル', '#ffffff'], p: ['陽性対照', '#9fd3a0'], n: ['陰性対照', '#f4b6b6'], e: ['空き', ''] };
+function textWidthEm(raw) {
+  // 斜めに書く名前の長さの目安（全角=1、半角=0.55）
+  let w = 0;
+  for (const ch of stripMarks(String(raw || '').replace(TOKEN_RE, (m, inner) => parseToken(inner).value || parseToken(inner).label || '　　'))) w += /[ -~]/.test(ch) ? 0.55 : 1;
+  return w;
+}
+function resizeFig(b) {
+  if (b.type === 'tubes') {
+    const n = Math.max(1, Math.min(24, parseInt(b.count) || 1));
+    b.count = n;
+    while (b.tubes.length < n) b.tubes.push({ mark: String(b.tubes.length + 1), name: '', kind: 's', vol: '' });
+    b.tubes.length = n;
+  } else if (b.type === 'gel') {
+    const n = Math.max(1, Math.min(30, parseInt(b.count) || 1));
+    const changed = n !== b.lanes.length;
+    b.count = n;
+    while (b.lanes.length < n) b.lanes.push({ mark: String(b.lanes.length), name: '', x: 0 });
+    b.lanes.length = n;
+    if (changed) b.lanes.forEach((l, k) => { l.x = (k + 0.5) / n; });
+  }
+}
+function equalizeLanes(b) {
+  const n = b.lanes.length;
+  if (n < 2) { if (n) b.lanes[0].x = 0.5; return; }
+  const a = b.lanes[0].x, z = b.lanes[n - 1].x;
+  b.lanes.forEach((l, k) => { l.x = a + (z - a) * k / (n - 1); });
+}
+function rotatedNames(items, ctx, heightEm) {
+  // items: [{left:'css位置', html}]  斜め45°の名前
+  return `<div class="rot-names" style="height:${heightEm}em">${items.map(it => `<div class="rot" style="left:${it.left}"><span>${it.html}</span></div>`).join('')}</div>`;
+}
+function renderTubes(b, bp, ctx) {
+  const n = b.tubes.length;
+  const cw = Math.min(15, 164 / n);   // 1本の幅(mm)
+  const maxW = Math.max(0, ...b.tubes.map(t => textWidthEm(t.name)));
+  const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.9) : 0;
+  const uid = 'tb' + Math.random().toString(36).slice(2, 8);
+  const names = maxW ? rotatedNames(b.tubes.map((t, k) => ({ left: `${cw * (k + 0.5)}mm`, html: inlineFmt(t.name, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode }) })), ctx, nameH) : '';
+  const fs = Math.min(11, cw * 0.95);   // 印の文字サイズ(pt)
+  const tubes = b.tubes.map((t, k) => {
+    const kind = TUBE_KINDS[t.kind] ? t.kind : 's';
+    const fill = kind === 'e' ? `url(#${uid}h)` : TUBE_KINDS[kind][1];
+    return `<div class="tube" style="width:${cw}mm">
+      <svg viewBox="0 0 40 84" preserveAspectRatio="none" class="tube-svg">
+        <defs><pattern id="${uid}h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#fff"/><line x1="0" y1="0" x2="0" y2="5" stroke="#999" stroke-width="1.6"/></pattern></defs>
+        <rect x="3" y="1" width="34" height="7" fill="#fff" stroke="#000" stroke-width="1.3"/>
+        <path d="M6 8 h28 v40 l-9 33 h-10 l-9 -33 z" fill="${fill}" stroke="#000" stroke-width="1.3"/>
+      </svg>
+      <div class="tube-mark" style="font-size:${fs}pt">${inlineFmt(t.mark, { ...ctx, mode: 'print' })}</div>
+      ${t.vol ? `<div class="tube-vol" style="font-size:${Math.min(8, fs * 0.7)}pt">${inlineFmt(t.vol, { ...ctx, mode: 'print' })}</div>` : ''}
+    </div>`;
+  }).join('');
+  const used = [...new Set(b.tubes.map(t => TUBE_KINDS[t.kind] ? t.kind : 's'))];
+  const legend = b.legend && used.length > 1 ? `<div class="tube-legend">${used.map(k => `<span class="sw ${k === 'e' ? 'hatch' : ''}" style="background:${TUBE_KINDS[k][1] || ''}"></span>${TUBE_KINDS[k][0]}`).join('　')}</div>` : '';
+  const head = b.label ? `<div class="blk-h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】</div>` : '';
+  const html = `<div class="tubes" style="width:${cw * n}mm">${head}${names}${b.strip ? `<div class="tube-strip"></div>` : ''}<div class="tube-row">${tubes}</div>${legend}</div>`;
+  return html + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（サンプル名・印・本数など）</summary>${tubesEdHtml(b, bp)}</details>` : '');
+}
+function gelImgBox(b, extra = '') {
+  const c = b.crop || { t: 0, b: 0, l: 0, r: 0 };
+  const fw = Math.max(0.05, 1 - (c.l + c.r) / 100), fh = Math.max(0.05, 1 - (c.t + c.b) / 100);
+  const ar = (b.nw && b.nh) ? (b.nw * fw) / (b.nh * fh) : 1.4;
+  return `<div class="g-img" style="aspect-ratio:${ar}"><img src="${b.src}" alt="" style="width:${100 / fw}%;left:${-c.l / fw}%;top:${-c.t / fh}%;filter:brightness(${b.bright || 100}%) contrast(${b.contrast || 100}%)">${extra}</div>`;
+}
+function renderGel(b, bp, ctx) {
+  const head = b.label ? `<div class="blk-h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】${b.note ? `<span class="extra">${inlineFmt(b.note, { ...ctx, mode: 'print' })}</span>` : ''}</div>` : '';
+  if (!b.src) {
+    const ph = `<div class="gel-empty">（泳動画像なし）</div>`;
+    return head + ph + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
+  }
+  const mks = (b.markers || []).filter(m => m.label);
+  const mkW = mks.length ? Math.max(2.2, ...mks.map(m => textWidthEm(m.label) + 0.8), textWidthEm(b.unit || '') + 0.4) : 0;
+  const maxW = Math.max(0, ...b.lanes.map(l => textWidthEm(l.name)));
+  const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.6) : 0;
+  const sub = { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode };
+  const names = maxW ? rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, nameH) : '';
+  const marks = `<div class="g-marks">${b.lanes.map(l => `<div style="left:${l.x * 100}%">${inlineFmt(l.mark, sub)}</div>`).join('')}</div>`;
+  const mkCol = mks.length ? `<div class="g-mk" style="width:${mkW}em">${b.unit ? `<div class="g-unit">${esc(b.unit)}</div>` : ''}${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '';
+  const html = `<div class="gel" style="width:${b.width || 80}%">${head}
+    <div class="g-wrap"><div class="g-left" style="width:${mkW}em"></div><div class="g-main">${names}${marks}</div></div>
+    <div class="g-wrap">${mkCol}<div class="g-main">${gelImgBox(b)}</div></div></div>`;
+  return html + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
+}
+
+// ---------- 図の編集パネル（プロトコル編集・記録の入力の両方で使う） ----------
+function tubesEdHtml(b, bp) {
+  return `<div class="row">見出し ${inp(bp + '.label', b.label, '8連チューブ', '160px')}
+    本数 <input type="number" min="1" max="24" data-bind="${bp}.count" data-num="1" data-resize="1" value="${b.tubes.length}" style="width:60px">
+    <label><input type="checkbox" data-bind="${bp}.strip" ${b.strip ? 'checked' : ''}> 連結（8連など）</label>
+    <label><input type="checkbox" data-bind="${bp}.legend" ${b.legend ? 'checked' : ''}> 凡例を表示</label>
+    <button type="button" class="small" data-fig="marks-num" data-path="${bp}">印を番号に戻す</button></div>
+    <table class="ed"><tr><th>No.</th><th>チューブの印</th><th>サンプル名（上に斜めに表示）</th><th>種類</th><th>液量など</th></tr>
+    ${b.tubes.map((t, k) => `<tr><td>${k + 1}</td><td>${inp(`${bp}.tubes.${k}.mark`, t.mark, '', '70px')}</td><td>${inp(`${bp}.tubes.${k}.name`, t.name, '例：His12-Orc2')}</td>
+      <td><select data-bind="${bp}.tubes.${k}.kind" data-rerender="1">${Object.entries(TUBE_KINDS).map(([v, [l]]) => `<option value="${v}" ${t.kind === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+      <td>${inp(`${bp}.tubes.${k}.vol`, t.vol, '例：19uL', '80px')}</td></tr>`).join('')}</table>`;
+}
+function gelPreviewHtml(b, bp) {
+  if (!b.src) return '';
+  const lanes = b.lanes.map((l, k) => `<div class="lh" data-drag="lane" data-path="${bp}" data-k="${k}" style="left:${l.x * 100}%"><span>${esc(stripMarks(l.mark) || k + 1)}</span></div>`).join('');
+  const mks = (b.markers || []).map((m, k) => `<div class="mh" data-drag="marker" data-path="${bp}" data-k="${k}" style="top:${m.y}%"><span>${esc(m.label || '目盛り')}</span></div>`).join('');
+  return `<div class="gel-prev" data-path="${bp}">${gelImgBox(b, lanes + mks)}</div>
+    <div class="muted">青い縦線＝レーンの位置、オレンジの横線＝マーカーの目盛り。線をドラッグして合わせてください。</div>`;
+}
+function gelEdHtml(b, bp) {
+  const c = b.crop || { t: 0, b: 0, l: 0, r: 0 };
+  const sl = (key, label, val, min, max) => `<label class="sl">${label}<input type="range" min="${min}" max="${max}" step="1" data-bind="${bp}.${key}" data-num="1" data-live="1" value="${val}"><span>${val}</span></label>`;
+  const idx = bp.split('.')[1];
+  return `<div class="row">見出し ${inp(bp + '.label', b.label, '電気泳動', '120px')} 続けて ${inp(bp + '.note', b.note, '例：1% アガロースゲル', '200px')}
+      表示の幅 ${inp(bp + '.width', b.width, '80', '44px')} %</div>
+    <div class="imgdrop" data-imgdrop="${idx}">${b.src ? '<span>別の画像に替えるときは、ここにドラッグ＆ドロップ</span>' : '<span>ここに泳動画像をドラッグ＆ドロップ（PNG・JPEG など）</span>'}</div>
+    <div class="row"><input type="file" accept="image/*" data-act="img" data-i="${idx}"></div>
+    ${b.src ? `<div class="sliders">
+      <b>切り抜き</b>${sl('crop.t', '上', c.t, 0, 45)}${sl('crop.b', '下', c.b, 0, 45)}${sl('crop.l', '左', c.l, 0, 45)}${sl('crop.r', '右', c.r, 0, 45)}
+      <br><b>明るさ</b>${sl('bright', '明るさ', b.bright || 100, 30, 300)}${sl('contrast', 'コントラスト', b.contrast || 100, 30, 300)}
+      <button type="button" class="small" data-fig="reset-img" data-path="${bp}">切り抜き・明るさを元に戻す</button></div>
+      ${gelPreviewHtml(b, bp)}` : ''}
+    <div class="row" style="margin-top:6px">レーン数 <input type="number" min="1" max="30" data-bind="${bp}.count" data-num="1" data-resize="1" value="${b.lanes.length}" style="width:60px">
+      <button type="button" class="small" data-fig="equalize" data-path="${bp}">最初と最後の間を等間隔にそろえる</button>
+      <button type="button" class="small primary" data-fig="from-tubes" data-path="${bp}">チューブ図から名前を引き継ぐ</button></div>
+    <table class="ed"><tr><th>レーン</th><th>上の記号（M, 1, 2…）</th><th>サンプル名（斜めに表示）</th></tr>
+    ${b.lanes.map((l, k) => `<tr><td>${k + 1}</td><td>${inp(`${bp}.lanes.${k}.mark`, l.mark, '', '70px')}</td><td>${inp(`${bp}.lanes.${k}.name`, l.name, '例：1kb ladder')}</td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:6px"><b>マーカーの目盛り（左側）</b> 単位 ${inp(bp + '.unit', b.unit, '(bp)', '60px')}
+      <button type="button" class="small" data-fig="mk-add" data-path="${bp}">＋ 目盛りを追加</button></div>
+    <table class="ed">${(b.markers || []).map((m, k) => `<tr><td>${inp(`${bp}.markers.${k}.label`, m.label, '例：1k', '80px')}</td><td>上から ${inp(`${bp}.markers.${k}.y`, m.y, '', '50px')} %</td>
+      <td><button type="button" class="small" data-fig="mk-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>`;
+}
+// 図のボタン操作。true を返したら描き直す
+function figAction(doc, t) {
+  const b = getPath(doc, t.dataset.path);
+  if (!b) return false;
+  switch (t.dataset.fig) {
+    case 'marks-num': b.tubes.forEach((x, k) => { x.mark = String(k + 1); }); return true;
+    case 'equalize': equalizeLanes(b); return true;
+    case 'reset-img': b.crop = { t: 0, b: 0, l: 0, r: 0 }; b.bright = 100; b.contrast = 100; return true;
+    case 'mk-add': (b.markers = b.markers || []).push({ label: '', y: 50 }); return true;
+    case 'mk-del': b.markers.splice(+t.dataset.k, 1); return true;
+    case 'from-tubes': {
+      const gi = doc.blocks.indexOf(b);
+      const before = doc.blocks.slice(0, gi).filter(x => x.type === 'tubes');
+      const tb = before.length ? before[before.length - 1] : doc.blocks.find(x => x.type === 'tubes');
+      if (!tb) { alert('この書面にチューブ配置図がありません。先にチューブ配置図ブロックを作ってください。'); return false; }
+      const src = tb.tubes.filter(x => x.kind !== 'e').map(x => x.name || x.mark);
+      const isM = l => /^(M|マーカー|marker|ladder)$/i.test(stripMarks(l.mark).trim());
+      let targets = b.lanes.filter(l => !isM(l));
+      if (targets.length < src.length) {
+        const need = b.lanes.length + (src.length - targets.length);
+        if (!confirm(`チューブ ${src.length} 本分の名前を入れるには、レーンが ${need} 本必要です。レーン数を ${need} にしますか？`)) return false;
+        b.count = need; resizeFig(b); targets = b.lanes.filter(l => !isM(l));
+      }
+      src.forEach((nm, k) => { targets[k].name = nm; });
+      toast(`チューブ図から ${src.length} 本分の名前を引き継ぎました`);
+      return true;
+    }
+  }
+  return false;
+}
+// 泳動画像のレーン線・目盛り線のドラッグ
+function bindGelDrag(root, doc, onDone) {
+  root.querySelectorAll('[data-drag]').forEach(h => {
+    h.onpointerdown = e => {
+      e.preventDefault();
+      const box = h.closest('.g-img').getBoundingClientRect();
+      const b = getPath(doc, h.dataset.path), k = +h.dataset.k;
+      h.setPointerCapture(e.pointerId);
+      h.onpointermove = ev => {
+        if (h.dataset.drag === 'lane') { const x = Math.min(1, Math.max(0, (ev.clientX - box.left) / box.width)); b.lanes[k].x = Math.round(x * 1000) / 1000; h.style.left = x * 100 + '%'; }
+        else { const y = Math.min(100, Math.max(0, (ev.clientY - box.top) / box.height * 100)); b.markers[k].y = Math.round(y * 10) / 10; h.style.top = y + '%'; }
+      };
+      h.onpointerup = () => { h.onpointermove = null; h.onpointerup = null; onDone(); };
+    };
+  });
+}
+// 画像を入れる（画像ブロック・泳動画像ブロック共通）
+function makeImageSetter(doc, after) {
+  return (i, file) => {
+    if (!/^image\//.test(file.type)) { alert('画像ファイル（PNG・JPEG など）を選んでください。'); return; }
+    const fr = new FileReader();
+    fr.onload = () => {
+      const b = doc.blocks[i];
+      if (!b) return;
+      b.src = fr.result;
+      if (b.type === 'gel') {
+        const im = new Image();
+        im.onload = () => { b.nw = im.naturalWidth; b.nh = im.naturalHeight; b.crop = { t: 0, b: 0, l: 0, r: 0 }; after(); };
+        im.src = fr.result;
+      } else after();
+    };
+    fr.readAsDataURL(file);
+  };
+}
+// data-bind の入力を反映（図の編集パネル用。プロトコル編集・記録の入力で共通）
+function applyBind(doc, t) {
+  let v = t.type === 'checkbox' ? t.checked : t.value;
+  if (t.dataset.num && v !== '') v = +v;
+  setPath(doc, t.dataset.bind, v);
+  if (t.dataset.live) { const s = t.parentNode.querySelector('span'); if (s) s.textContent = t.value; }
+  if (t.dataset.resize) { const bp = t.dataset.bind.split('.').slice(0, 2).join('.'); resizeFig(getPath(doc, bp)); }
+}
+function refreshGelPreview(root, doc, t) {
+  const bp = t.dataset.bind.split('.').slice(0, 2).join('.');
+  const pv = root.querySelector(`.gel-prev[data-path="${bp}"]`);
+  if (!pv) return;
+  const b = getPath(doc, bp);
+  pv.outerHTML = gelPreviewHtml(b, bp).replace(/<div class="muted">[\s\S]*$/, '');
+  return true;
+}
+
 // ============================================================
 // 各画面
 // ============================================================
@@ -1028,6 +1243,8 @@ function recordEditor(rec, id, base) {
   const upd = () => { const n = countBlanks(doc); document.getElementById('blanks').textContent = n ? `未入力の可変欄：${n}個` : '可変欄はすべて入力済み'; };
   const drawFill = () => {
     body.innerHTML = `<div class="legend">黄色の欄に入力してください（Tabキーで次の欄へ）。空欄のまま印刷すると、手書き用の灰色の空欄になります。</div>${renderDoc(doc, { mode: 'fill', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false })}`;
+    imageDropHandler = makeImageSetter(doc, () => { dirty = true; drawFill(); });
+    bindGelDrag(body, doc, () => { dirty = true; drawFill(); });
     upd();
   };
   const drawEdit = () => {
@@ -1042,6 +1259,11 @@ function recordEditor(rec, id, base) {
   redraw();
   body.addEventListener('input', e => {
     const t = e.target;
+    if (tab === 'fill' && t.dataset.bind) {
+      applyBind(doc, t); dirty = true; upd();
+      if (t.dataset.live) { refreshGelPreview(body, doc, t); bindGelDrag(body, doc, () => { dirty = true; drawFill(); }); }
+      return;
+    }
     if (!t.classList.contains('vin')) return;
     dirty = true;
     if (t.dataset.num) setPath(doc, t.dataset.path, t.value);
@@ -1051,14 +1273,24 @@ function recordEditor(rec, id, base) {
     upd();
   });
   body.addEventListener('change', e => {
-    if (!e.target.classList.contains('vin') || tab !== 'fill') return;
+    const t = e.target;
+    if (tab !== 'fill') return;
+    if (t.dataset.act === 'img' && t.files && t.files[0]) { imageDropHandler(+t.dataset.i, t.files[0]); return; }
+    if (t.dataset.bind) applyBind(doc, t);
+    if (!t.classList.contains('vin') && !t.dataset.bind) return;
     setTimeout(() => {
-      const key = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
+      const a = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset : {};
+      const key = a.key ? ['key', a.key] : a.bind ? ['bind', a.bind] : null;
       const y = window.scrollY;
       drawFill();
       window.scrollTo(0, y);
-      if (key) { const el = body.querySelector(`[data-key="${CSS.escape(key)}"]`); if (el) el.focus(); }
+      if (key) { const el = body.querySelector(`[data-${key[0]}="${CSS.escape(key[1])}"]`); if (el) el.focus(); }
     }, 0);
+  });
+  body.addEventListener('click', e => {
+    const f = e.target.closest('[data-fig]');
+    if (!f || tab !== 'fill') return;
+    if (figAction(doc, f)) { dirty = true; const y = window.scrollY; drawFill(); window.scrollTo(0, y); }
   });
   document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
     tab = b.dataset.tab;

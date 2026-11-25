@@ -143,6 +143,53 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 
 .cutguide { display: none; }
 
+
+/* ===== 図：チューブ配置図・泳動画像 ===== */
+.sheet .tubes { margin: 1.5mm 0 2.5mm; break-inside: avoid; }
+.sheet .rot-names { position: relative; }
+.sheet .rot { position: absolute; bottom: 0.15em; width: 0; height: 0; }
+.sheet .rot span { position: absolute; left: -0.25em; bottom: 0; transform-origin: 0 100%; transform: rotate(-45deg); white-space: nowrap; line-height: 1.1; font-size: 10pt; }
+.sheet .tube-strip { height: 1.2mm; border: 0.8pt solid #000; border-bottom: none; margin: 0 0.6mm -0.2mm; }
+.sheet .tube-row { display: flex; }
+.sheet .tube { position: relative; aspect-ratio: 40 / 84; }
+.sheet .tube-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.sheet .tube-mark { position: absolute; left: 0; right: 0; top: 24%; text-align: center; font-weight: bold; line-height: 1.1; }
+.sheet .tube-vol { position: absolute; left: 0; right: 0; top: 50%; text-align: center; line-height: 1.1; }
+.sheet .tube-legend { font-size: 9pt; margin-top: 1mm; }
+.sheet .tube-legend .sw { display: inline-block; width: 0.9em; height: 0.9em; border: 0.6pt solid #000; vertical-align: -0.1em; margin-right: 0.2em; }
+.sheet .tube-legend .sw.hatch { background: repeating-linear-gradient(45deg, #fff 0 2px, #999 2px 3px) !important; }
+.sheet .gel { margin: 1.5mm 0 2.5mm; break-inside: avoid; }
+.sheet .g-wrap { display: flex; }
+.sheet .g-left { flex: none; }
+.sheet .g-main { flex: 1; position: relative; min-width: 0; }
+.sheet .g-marks { position: relative; height: 1.4em; }
+.sheet .g-marks div { position: absolute; transform: translateX(-50%); font-weight: bold; bottom: 0.1em; white-space: nowrap; }
+.sheet .g-img { position: relative; overflow: hidden; background: #000; width: 100%; }
+.sheet .g-img img { position: absolute; max-width: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.sheet .g-mk { flex: none; position: relative; font-size: 9pt; }
+.sheet .g-unit { position: absolute; right: 0.6em; top: -1.5em; }
+.sheet .g-tick { position: absolute; right: 0; transform: translateY(-50%); padding-right: 0.7em; white-space: nowrap; }
+.sheet .g-tick::after { content: ""; position: absolute; right: 0; top: 50%; width: 0.45em; border-top: 0.6pt solid #000; }
+.sheet .gel-empty { border: 0.6pt dashed #888; color: #888; text-align: center; padding: 8mm 0; width: 60%; }
+/* 図の編集パネル（入力画面で図の下に出る。印刷されない） */
+.sheet .fig-ed { font-family: var(--ui); font-size: 13px; line-height: 1.5; background: #f4f8fc; border: 1px solid #c9d6e3; border-radius: 6px; padding: 6px 10px; margin: 0 0 4mm; }
+.sheet .fig-ed summary { cursor: pointer; color: var(--accent); font-weight: bold; }
+.fig-ed table.ed, .blk table.ed { border-collapse: collapse; width: 100%; }
+.fig-ed table.ed input[type=text] { width: 100%; }
+.sliders { margin: 6px 0; line-height: 2.1; }
+.sliders .sl { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }
+.sliders .sl input { width: 110px; }
+.sliders .sl span { min-width: 2.5em; color: #555; font-size: 12px; }
+.gel-prev { max-width: 560px; margin: 6px 0 2px; user-select: none; }
+.gel-prev .g-img { position: relative; overflow: hidden; background: #000; width: 100%; }
+.gel-prev .g-img img { position: absolute; max-width: none; }
+.gel-prev .lh { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; cursor: ew-resize; touch-action: none; }
+.gel-prev .lh::before { content: ""; position: absolute; left: 6px; top: 0; bottom: 0; border-left: 2px solid #3d9bff; }
+.gel-prev .lh span { position: absolute; top: 2px; left: 9px; background: #3d9bff; color: #fff; font-size: 11px; padding: 0 3px; border-radius: 2px; }
+.gel-prev .mh { position: absolute; left: 0; right: 0; height: 12px; margin-top: -6px; cursor: ns-resize; touch-action: none; }
+.gel-prev .mh::before { content: ""; position: absolute; top: 5px; left: 0; right: 0; border-top: 2px dashed #ff9d2e; }
+.gel-prev .mh span { position: absolute; left: 2px; top: -9px; background: #ff9d2e; color: #fff; font-size: 11px; padding: 0 3px; border-radius: 2px; }
+
 /* ===== 印刷 ===== */
 @page { size: A4 portrait; margin: 13.5mm 20mm; }
 @media print {

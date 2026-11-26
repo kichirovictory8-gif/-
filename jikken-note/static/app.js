@@ -840,6 +840,102 @@ async function pdfToItems(file) {
   }
   return items;
 }
+// ---------- 画像（スクリーンショット）からの取り込み：文字認識（OCR） ----------
+//   1) ツールを起動している Windows の文字認識（日本語）を使う
+//   2) 使えないときは、ブラウザの中で Tesseract（同梱）を使う
+async function imageToOcrCanvas(file) {
+  let cv;
+  if (isTiff(file)) cv = await tiffToCanvas(file);
+  else {
+    const url = await new Promise((ok, ng) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = ng; fr.readAsDataURL(file); });
+    const im = await loadImg(url);
+    cv = document.createElement('canvas'); cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+    cv.getContext('2d').drawImage(im, 0, 0);
+  }
+  // 文字が小さいと読み間違えるので、小さい画像は拡大する（長い辺 最大 4000px）
+  const long = Math.max(cv.width, cv.height);
+  const r = Math.min(4000 / long, long < 1600 ? 2 : 1);
+  if (r !== 1) {
+    const c2 = document.createElement('canvas');
+    c2.width = Math.round(cv.width * r); c2.height = Math.round(cv.height * r);
+    const g = c2.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c2.width, c2.height);
+    g.imageSmoothingQuality = 'high'; g.drawImage(cv, 0, 0, c2.width, c2.height);
+    cv = c2;
+  }
+  return cv;
+}
+async function ocrImage(file) {
+  const cv = await imageToOcrCanvas(file);
+  try {
+    const r = await fetch('/api/ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: cv.toDataURL('image/png').split(',')[1] }) });
+    const j = await r.json();
+    if (j && j.lines) return j.lines;
+  } catch (e) { /* ブラウザ側で読む */ }
+  toast('文字を読み取り中…（初回は少し時間がかかります）');
+  await loadScript('/vendor/tesseract/tesseract.min.js');
+  const worker = await Tesseract.createWorker(['jpn', 'eng'], 1, {
+    workerPath: '/vendor/tesseract/worker.min.js', corePath: '/vendor/tesseract/core', langPath: '/vendor/tesseract/lang', gzip: true,
+    logger: m => { if (m.status === 'recognizing text' && m.progress) toast(`文字を読み取り中… ${Math.round(m.progress * 100)}%`); },
+  });
+  try {
+    await worker.setParameters({ preserve_interword_spaces: '1' });
+    const { data } = await worker.recognize(cv);
+    return (data.lines || []).map(l => ({ words: (l.words || []).map(w => ({ t: w.text, x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1 - w.bbox.x0, h: w.bbox.y1 - w.bbox.y0 })) }));
+  } finally { await worker.terminate(); }
+}
+// 文字認識のよくある読み違いを直す
+function ocrFix(t) {
+  t = t.replace(/\s+$/, '');
+  if (/^[|!lI1↓丨｜]$/.test(t.trim())) return '↓';                     // 矢印だけの行
+  t = t.replace(/^[@◎⑨®©]\s*/, '●')                                   // 行頭の ●
+    .replace(/^\[([^\[\]]{1,30})\]/, '【$1】')                          // 行頭の [見出し] → 【見出し】
+    .replace(/(\d)\s*[°º]\s*C\b/g, '$1℃').replace(/(\d)C(?=[、,，\s)）]|$)/g, '$1℃')
+    .replace(/(\d)\s*[xX]\s*(?=[\dA-Z(（])/g, '$1×')                     // 5x → 5×
+    .replace(/[µμ]\s*[lL]\b/g, 'uL').replace(/\b0K\b/g, 'OK');
+  return t;
+}
+// 認識した単語の並び → 取り込み用の行（字下げ・空行も再現）
+function ocrToItems(lines) {
+  const isAsc = ch => /[A-Za-z0-9.,%()\-+/:;=°]/.test(ch || '');
+  const rows = lines.map(l => {
+    let ws = (l.words || []).filter(w => w.t && w.t.trim()).sort((a, b) => a.x - b.x);
+    // 矢印の縦線（| ! など）が文字の行にくっついて読まれたものは外す
+    const bar = w => /^[|!lI丨｜]$/.test(w.t.trim());
+    if (ws.some(w => !bar(w))) ws = ws.filter(w => !bar(w));
+    if (!ws.length) return null;
+    const hs = ws.map(w => w.h).sort((a, b) => a - b);
+    const h = hs[Math.floor(hs.length / 2)] || 10;
+    let text = '', end = null, prev = '';
+    for (const w of ws) {
+      const t = w.t.trim();
+      if (end !== null) {
+        const gap = w.x - end;
+        if (gap > h * 1.6) text += '　';
+        else if (gap > h * 0.25 && isAsc(prev.slice(-1)) && isAsc(t[0])) text += ' ';
+      }
+      text += t; end = w.x + w.w; prev = t;
+    }
+    // よくある読み違いを直す
+    text = ocrFix(text);
+    return { x: ws[0].x, y: Math.min(...ws.map(w => w.y)), h, text };
+  }).filter(Boolean).sort((a, b) => a.y - b.y);
+  if (!rows.length) return [];
+  const hMed = rows.map(r => r.h).sort((a, b) => a - b)[Math.floor(rows.length / 2)];
+  const minX = Math.min(...rows.map(r => r.x));
+  const items = [];
+  let prevBottom = null, titled = false;
+  for (const r of rows) {
+    if (prevBottom !== null && r.y - prevBottom > hMed * 1.4) items.push({ type: 'p', text: '', plain: '', ind: 0 });
+    prevBottom = r.y + r.h;
+    const ind = Math.max(0, Math.min(12, Math.round((r.x - minX) / hMed)));
+    // 最初の「●」の行をプロトコルの題名にする
+    const title = !titled && /^●/.test(r.text);
+    if (title) titled = true;
+    items.push({ type: 'p', text: r.text, plain: r.text, ind: title ? 0 : ind, all_bold: false, any_underline: false, level: title ? 1 : null, pdf: true });
+  }
+  items.push({ type: 'p', text: '', plain: '', ind: 0 });
+  return items;
+}
 function balanceMarks(t) {
   for (const m of ['**', '__', '==', '!!']) {
     const n = t.split(m).length - 1;
@@ -1004,11 +1100,13 @@ async function readImportFile(file) {
     if (low.endsWith('.docx')) items = (await api.send('POST', 'import', { name, data: await fileToBase64(file) })).items;
     else if (low.endsWith('.pdf')) items = await pdfToItems(file);
     else if (low.endsWith('.txt')) items = (await file.text()).split(/\r?\n/).map(t => ({ type: 'p', text: t, plain: t, ind: 0, pdf: true }));
+    else if (isImageFile(file)) items = ocrToItems(await ocrImage(file));
     else if (low.endsWith('.doc')) { alert(`「${name}」は古い Word 形式（.doc）なので読めません。Word で開いて「名前を付けて保存」→「Word 文書 (*.docx)」で保存してから取り込んでください。`); return []; }
-    else { alert(`「${name}」は取り込めません。取り込めるのは Word（.docx）・PDF・テキスト（.txt）です。`); return []; }
+    else { alert(`「${name}」は取り込めません。取り込めるのは Word（.docx）・PDF・テキスト（.txt）・画像（PNG・JPEG など）です。`); return []; }
   } catch (e) { if (!/保存・読み込み/.test(String(e))) alert(`「${name}」を読み取れませんでした: ` + e.message); return []; }
   const protos = structureImport(items, name);
-  if (!protos.length) alert(`「${name}」から文字を読み取れませんでした。（画像だけのPDF＝スキャンした紙などは読み取れません）`);
+  if (!protos.length) alert(`「${name}」から文字を読み取れませんでした。` + (isImageFile(file) ? '（文字が小さすぎる・薄い画像は読み取れないことがあります。拡大してからスクリーンショットを撮り直してください）' : '（画像だけのPDF＝スキャンした紙などは、ページをスクリーンショット（PNG）にすると取り込めます）'));
+  if (protos.length && isImageFile(file)) protos.forEach(p => { p.fromImage = true; });
   return protos;
 }
 async function importFile(file) { return importFiles([file]); }
@@ -1035,22 +1133,31 @@ async function importFiles(files) {
     else if (t.dataset.ok !== undefined) {
       const sel = [...bg.querySelectorAll('input[data-i]:checked')].map(c => +c.dataset.i);
       if (!sel.length) return;
-      for (const i of sel) { const p = protos[i]; p.name = nameOf(i); await api.send('POST', 'protocols', { data: p }); }
+      for (const i of sel) { const p = protos[i]; p.name = nameOf(i); delete p.fromImage; await api.send('POST', 'protocols', { data: p }); }
       bg.remove(); toast(`${sel.length} 件を登録しました`);
       if (location.hash === '#/protocols') viewProtocols(); else go('#/protocols');
     }
   };
 }
 function importCardHtml() {
-  return `<div class="card drop" id="drop"><div class="row"><b>Word・PDFから取り込む</b>
-    <label class="btn primary">ファイルを選ぶ<input type="file" id="impfile" accept=".docx,.pdf,.txt,.doc" multiple hidden></label>
-    <span class="muted">またはファイルを画面のどこかにドラッグ＆ドロップ（複数ファイルもまとめて取り込めます）。今までのプロトコルから大まかな形を自動で作ります（取り込んだ後に自由に直せます）。</span></div></div>`;
+  return `<div class="card drop" id="drop"><div class="row"><b>Word・PDF・画像（PNG）から取り込む</b>
+    <label class="btn primary">ファイルを選ぶ<input type="file" id="impfile" accept=".docx,.pdf,.txt,.doc,.png,.jpg,.jpeg,.bmp,.gif,.webp,.tif,.tiff,image/*" multiple hidden></label>
+    <span class="muted">またはファイルを画面のどこかにドラッグ＆ドロップ（複数ファイルもまとめて取り込めます）。スクリーンショットは、撮った後にこの画面で <b>Ctrl+V</b>（貼り付け）でも取り込めます。今までのプロトコルから大まかな形を自動で作ります（取り込んだ後に自由に直せます。画像は文字を読み取るので、読み間違いがないか確認してください）。</span></div></div>`;
 }
 function bindImportCard() {
   const inpEl = document.getElementById('impfile'), drop = document.getElementById('drop');
   inpEl.onchange = () => { if (inpEl.files.length) importFiles(inpEl.files); inpEl.value = ''; };
 }
 
+// ---------- 貼り付け（Ctrl+V）：プロトコルの管理画面でスクリーンショットを取り込む ----------
+document.addEventListener('paste', e => {
+  if (location.hash !== '#/protocols') return;
+  if (e.target && e.target.closest && e.target.closest('input,textarea,[contenteditable]')) return;
+  const files = [...((e.clipboardData && e.clipboardData.items) || [])].filter(it => it.kind === 'file' && /^image\//.test(it.type)).map(it => it.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  importFiles(files.map((f, k) => new File([f], `スクリーンショット${files.length > 1 ? k + 1 : ''}.png`, { type: f.type || 'image/png' })));
+});
 // ---------- ドラッグ＆ドロップ（画面のどこに落としても取り込む） ----------
 let imageDropHandler = null;
 (() => {
@@ -1080,8 +1187,10 @@ let imageDropHandler = null;
     const files = [...e.dataTransfer.files];
     if (!files.length) return;
     if (z && imageDropHandler && document.body.contains(z)) { imageDropHandler(+z.dataset.imgdrop, files[0]); return; }
-    const docs = files.filter(f => !isImageFile(f));
-    if (!docs.length) { alert('画像は、プロトコル編集画面の「画像」ブロックの枠にドロップしてください。'); return; }
+    // プロトコルの管理画面では、画像（スクリーンショット）も文字を読み取って取り込む
+    const onList = location.hash === '#/protocols';
+    const docs = files.filter(f => onList || !isImageFile(f));
+    if (!docs.length) { alert('画像を「画像」ブロックに入れるときは、その枠にドロップしてください。\nスクリーンショットからプロトコルを作るときは、「プロトコルの管理」画面にドロップしてください。'); return; }
     importFiles(docs);
   });
 })();
@@ -2048,7 +2157,7 @@ async function viewProtocolEdit(id) {
   refreshTagList();
   chem.onchange = draw;
   draw();
-  if (imported) { dirty = true; showBanner('data', '取り込んだ内容です。右の印刷イメージを見ながら直して、最後に「保存」を押してください（まだ保存されていません）。'); }
+  if (imported) { dirty = true; showBanner('data', doc.fromImage ? '画像から文字を読み取った内容です。読み間違い（数字・単位・記号など）がないか確認しながら直して、最後に「保存」を押してください（まだ保存されていません）。' : '取り込んだ内容です。右の印刷イメージを見ながら直して、最後に「保存」を押してください（まだ保存されていません）。'); delete doc.fromImage; }
   document.getElementById('save').onclick = async () => {
     if (!doc.name) doc.name = doc.title || '無題';
     if (id === 'new') { const r = await api.send('POST', 'protocols', { data: doc }); dirty = false; toast('保存しました'); go('#/protocol/' + r.id); }

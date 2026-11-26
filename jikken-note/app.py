@@ -207,6 +207,31 @@ def backup(auto=False):
     return dest
 
 
+def windows_ocr(png_bytes):
+    """Windows に入っている文字認識（日本語）で画像を読む。使えないときは None"""
+    if os.name != "nt":
+        return None
+    import subprocess
+    import tempfile
+    script = os.path.join(BASE, "ocr_windows.ps1")
+    tmp = tempfile.mkdtemp(prefix="jn_ocr_")
+    img, out = os.path.join(tmp, "in.png"), os.path.join(tmp, "out.json")
+    try:
+        with open(img, "wb") as f:
+            f.write(png_bytes)
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                        "-File", script, img, out],
+                       timeout=90, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not os.path.exists(out):
+            return None
+        res = json.loads(open(out, encoding="utf-8-sig").read())
+        return None if res.get("error") else res
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def row_protocol(r, full=True):
     data = json.loads(r["data"])
     d = {"id": r["id"], "name": r["name"], "sort": r["sort"], "updated": r["updated"],
@@ -439,6 +464,10 @@ class Handler(BaseHTTPRequestHandler):
                         changed += 1
                 con.commit()
                 return self.send_json({"ok": True, "changed": changed})
+            if p[1:] == ["ocr"]:
+                # 画像（スクリーンショット）の文字を読む。Windows の文字認識が使えなければ、ブラウザ側で読む
+                res = windows_ocr(base64.b64decode(body.get("data", "")))
+                return self.send_json(res or {"unavailable": True})
             if p[1:] == ["backup"]:
                 if not self.is_local():
                     return self.send_json({"error": "バックアップはツールを起動しているPCで行ってください"}, 403)

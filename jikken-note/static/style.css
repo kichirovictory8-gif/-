@@ -296,8 +296,15 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .sheet.natmeasure .block { display: block; width: max-content; max-width: 164mm; }
 .sheet.natmeasure .block-row { display: block; }
 /* 印刷プレビューのドラッグ */
-.pages.dragmode .page [data-bi] { cursor: grab; }
-.pages.dragmode .page [data-bi]:hover { outline: 1px dashed #7aa7d9; outline-offset: 1px; }
+.pages.dragmode .page [data-bi], #pv [data-bi] { cursor: grab; }
+.pages.dragmode .page [data-bi]:hover, #pv [data-bi]:hover { outline: 1px dashed #7aa7d9; outline-offset: 1px; }
+.rz-hot, .rz-hot [data-bi] { cursor: ew-resize !important; }
+#pv [data-bi].dragging { opacity: 0.35; }
+#pv [data-bi].drop-top { box-shadow: 0 -3px 0 #1f5fa8; }
+#pv [data-bi].drop-bottom { box-shadow: 0 3px 0 #1f5fa8; }
+#pv [data-bi].drop-left { box-shadow: -4px 0 0 #1f5fa8; }
+#pv [data-bi].drop-right { box-shadow: 4px 0 0 #1f5fa8; }
+#pv [data-bi].drop-bad { box-shadow: 0 0 0 2px #d32f2f; }
 .pages .page [data-bi].dragging { opacity: 0.35; }
 .pages .page [data-bi].drop-top { box-shadow: 0 -3px 0 #1f5fa8; }
 .pages .page [data-bi].drop-bottom { box-shadow: 0 3px 0 #1f5fa8; }
@@ -315,3 +322,16 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .sheet table.dil-t td.num { text-align: right; }
 .sheet table.dil-t td.note { text-align: left; white-space: normal; min-width: 12mm; }
 .sheet table.dil-t.no-note td:last-child { display: none; }
+/* 泳動ブロックの「ゲル」と「泳動サンプル」は横に並べる */
+.sheet .gel-recipes { display: flex; gap: 8mm; flex-wrap: wrap; align-items: flex-start; }
+.sheet .gel-recipe select { font: inherit; padding: 0 2px; background: var(--var); border: 1px solid #e0b400; border-radius: 3px; }
+/* Gibson */
+.sheet .gib { break-inside: avoid; margin: 1mm 0 1.5mm; }
+.sheet table.gib-t { font-size: 9pt; }
+.sheet table.gib-t td { padding: 0.3mm 1.2mm; }
+.sheet table.gib-t td { white-space: nowrap; }
+.sheet table.gib-t td.num { text-align: right; }
+.sheet table.gib-t td.need { font-weight: bold; }
+.sheet table.gib-t tr.sum td { border-top: 1pt solid #000; }
+.sheet .gib-msg { margin: 0 0 0 1em; font-size: 9.5pt; }
+.blk-head .badge { font-size: 12px; color: #1f5fa8; background: #e8f1fb; border-radius: 4px; padding: 1px 6px; }

@@ -5,7 +5,9 @@
   --accent: #1f5fa8;
   --var: #fff2a8;
   --line: #ccd3db;
+  --z: 1.2;   /* 画面の文字の大きさ（上の「文字 小・中・大・特大」で変わる。印刷には効かない） */
 }
+@media screen { html { zoom: var(--z); } }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: var(--ui); font-size: 15px; overflow-wrap: anywhere; color: #222; background: #eef1f4; }
 a { color: var(--accent); }
@@ -38,7 +40,7 @@ table.list tr:hover td { background: #fafcff; }
 .banner { position: sticky; top: 42px; z-index: 30; display: flex; gap: 12px; align-items: center; justify-content: center; background: #fff4ce; border-bottom: 1px solid #e0c060; padding: 8px 16px; font-size: 14px; }
 .drop { border: 2px dashed #9fb4cc; background: #f7fbff; }
 .drop.over { background: #e3f0ff; border-color: var(--accent); }
-#dropov { display: none; position: fixed; inset: 0; z-index: 60; pointer-events: none; background: rgba(31,95,168,.12); border: 4px dashed var(--accent); align-items: flex-start; justify-content: center; padding-top: 30vh; font-size: 22px; font-weight: bold; color: #1f3b5c; }
+#dropov { display: none; position: fixed; inset: 0; z-index: 60; pointer-events: none; background: rgba(31,95,168,.12); border: 4px dashed var(--accent); align-items: flex-start; justify-content: center; padding-top: calc(30vh / var(--z)); font-size: 22px; font-weight: bold; color: #1f3b5c; }
 #dropov.on { display: flex; }
 #dropov.img { background: rgba(31,95,168,.04); }
 .imgdrop { border: 2px dashed #9fb4cc; background: #f7fbff; border-radius: 6px; padding: 10px; margin-bottom: 6px; text-align: center; color: #5a6b7d; display: flex; align-items: center; gap: 10px; justify-content: center; min-height: 54px; }
@@ -61,7 +63,7 @@ main { min-width: 0; }
 .tabs button { border-radius: 6px 6px 0 0; }
 .tabs button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 .split { display: grid; grid-template-columns: minmax(420px, 1fr) auto; gap: 18px; align-items: start; }
-.preview-wrap { position: sticky; top: 150px; max-height: calc(100vh - 170px); overflow: auto; padding: 4px; }
+.preview-wrap { position: sticky; top: 150px; max-height: calc(100vh / var(--z) - 170px); overflow: auto; padding: 4px; }
 .legend { font-size: 12px; color: #555; margin: 4px 0 8px; }
 .legend .sw { display: inline-block; padding: 0 6px; margin: 0 2px; border-radius: 2px; }
 
@@ -85,7 +87,7 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .help-table td, .help-table th { border: 1px solid #ccc; padding: 6px 8px; }
 .help-table { border-collapse: collapse; background: #fff; }
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 40; display: flex; align-items: center; justify-content: center; }
-.modal { background: #fff; border-radius: 8px; padding: 18px; width: min(820px, 94vw); max-height: 86vh; overflow: auto; }
+.modal { background: #fff; border-radius: 8px; padding: 18px; width: min(820px, calc(94vw / var(--z))); max-height: calc(86vh / var(--z)); overflow: auto; }
 .tg-line { display: grid; grid-template-columns: 24px 1fr 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid #eee; font-family: var(--mincho); }
 .tg-line .new { color: #0a6b2d; }
 
@@ -269,3 +271,18 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .blk.off { background: #f1f1f1; }
 .blk.off > :not(.blk-head) { opacity: 0.45; }
 @media print { .sheet .pchk { display: none !important; } }
+
+/* 文字の大きさの切り替え */
+.topbar .zoomctl { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
+.topbar .zoomctl button { padding: 1px 8px; font-size: 13px; background: transparent; color: #fff; border-color: #6d87a6; }
+.topbar .zoomctl button.on { background: #fff; color: #1f3b5c; border-color: #fff; }
+/* プロトコルのフォルダ */
+details.folder > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none; }
+details.folder > summary::-webkit-details-marker { display: none; }
+details.folder > summary::before { content: '▶'; font-size: 11px; color: #6b7785; transition: transform .15s; }
+details.folder[open] > summary::before { transform: rotate(90deg); }
+details.folder[open] > summary { margin-bottom: 10px; }
+details.folder .ftitle { font-size: 17px; font-weight: bold; color: #1f3b5c; }
+select.small-sel { padding: 2px 4px; font-size: 13px; }
+/* 編集画面の右の印刷イメージは少し縮めて、左の編集欄を広くする */
+.split .preview-wrap #pv { zoom: 0.75; }

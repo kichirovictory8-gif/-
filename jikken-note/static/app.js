@@ -210,15 +210,24 @@ function renderSteps(str, ctx) {
   }
   return parts.join('<div class="gap"></div>');
 }
+// 全体量で決める計算：「基準量あたりの量」×（作製量 ÷ 基準量）。単位は uL・mL・L を換算する
+const VOL_UNITS = { uL: 0.001, mL: 1, L: 1000 };
+function matVolInfo(b) {
+  const base = isNaN(num(b.base)) || num(b.base) <= 0 ? 1 : num(b.base);
+  const bu = VOL_UNITS[b.base_unit] ? b.base_unit : 'L';
+  const mu = VOL_UNITS[b.make_unit] ? b.make_unit : 'mL';
+  return { base, bu, mu, ratio: VOL_UNITS[mu] / (base * VOL_UNITS[bu]), per: base === 1 ? `/${bu}` : `/${fmtNum(base)}${bu}` };
+}
 function matCompute(b) {
   const n = num(b.n);
   const vol = b.mode === 'volume';
-  const factor = isNaN(n) ? NaN : (vol ? n / 1000 : n);
+  const vi = vol ? matVolInfo(b) : null;
+  const factor = isNaN(n) ? NaN : (vol ? n * vi.ratio : n);
   const total = num(b.total);
   let sumCalc = 0;
   for (const r of b.rows) if ((r.kind || 'calc') === 'calc' && !isNaN(num(r.per1))) sumCalc += num(r.per1);
   const restPer1 = isNaN(total) ? NaN : Math.round((total - sumCalc) * 1000) / 1000;
-  return { n, factor, total, restPer1, vol };
+  return { n, factor, total, restPer1, vol, vi };
 }
 function renderMaterials(b, bp, ctx) {
   const c = matCompute(b);
@@ -227,7 +236,7 @@ function renderMaterials(b, bp, ctx) {
     : (b.n !== '' && b.n != null ? `<span class="vf">${esc(b.n)}</span>` : `<span class="vf blank" style="min-width:3em">&nbsp;</span>`);
   const label = inlineFmt(b.label || '', { ...ctx, path: `${bp}.label` });
   const head = c.vol
-    ? `${label}（作製量：${nHtml} mL）`
+    ? `${label}（作製量：${nHtml} ${esc(c.vi.mu)}）`
     : `${label}（×${nHtml}${esc(b.nunit || 'サンプル')}分）`;
   const amt = (per1, unit) => {
     if (isNaN(per1)) return `<span class="vf blank">&nbsp;</span>${esc(unit)}`;
@@ -239,7 +248,7 @@ function renderMaterials(b, bp, ctx) {
     const kind = r.kind || 'calc';
     const rp = `${bp}.rows.${i}`;
     let a = '', ref = '';
-    const unitRef = r.unit + (c.vol ? '/L' : '');
+    const unitRef = r.unit + (c.vol ? c.vi.per : '');
     if (kind === 'calc') { a = amt(num(r.per1), r.unit); ref = isNaN(num(r.per1)) ? '' : fmtNum(num(r.per1)) + unitRef; }
     else if (kind === 'rest') { a = amt(c.restPer1, r.unit); ref = isNaN(c.restPer1) ? '残り' : fmtNum(c.restPer1) + unitRef; }
     else if (kind === 'vol') { a = isNaN(c.n) ? `<span class="vf blank" style="min-width:3em">&nbsp;</span>${esc(r.unit)}` : `<span class="vf calc">${fmtNum(c.n)}</span>${esc(r.unit)}`; }
@@ -249,7 +258,7 @@ function renderMaterials(b, bp, ctx) {
     rows += `<tr><td class="nm" style="padding-left:${1 + (+r.indent || 0)}em">${bullet}${inlineFmt(r.name, { ...ctx, path: `${rp}.name` })}</td><td>：</td><td class="amt">${a}</td><td>${refHtml}</td><td class="note">${inlineFmt(r.note || '', { ...ctx, path: `${rp}.note` })}</td></tr>`;
   });
   if (b.total !== '' && b.total != null) {
-    rows += `<tr class="total"><td class="nm">　${esc(b.total_label || 'Total')}</td><td>：</td><td class="amt">${amt(c.total, b.total_unit || '')}</td><td>（${fmtNum(c.total)}${esc(b.total_unit || '')}${c.vol ? '/L' : ''}）</td><td></td></tr>`;
+    rows += `<tr class="total"><td class="nm">　${esc(b.total_label || 'Total')}</td><td>：</td><td class="amt">${amt(c.total, b.total_unit || '')}</td><td>（${fmtNum(c.total)}${esc(b.total_unit || '')}${c.vol ? esc(c.vi.per) : ''}）</td><td></td></tr>`;
   }
   const hdr = c.vol ? '' : '<tr class="mh"><td></td><td></td><td></td><td>（×１量）</td><td></td></tr>';
   return `<div class="mat"><div class="mat-h"><span>${head}</span></div><table class="mat-t">${hdr}${rows}</table></div>`;
@@ -472,12 +481,16 @@ function blockEditorHtml(b, i, n) {
       break;
     case 'materials': {
       body = `<div class="row">見出し ${inp(bp + '.label', b.label, '〇PCR pre-mix まとめ作り', '260px')}
-        計算 <select data-bind="${bp}.mode"><option value="sample" ${b.mode !== 'volume' ? 'selected' : ''}>サンプル数 × 1量</option><option value="volume" ${b.mode === 'volume' ? 'selected' : ''}>作製量(mL) × 濃度(/L)</option></select>
-        ${b.mode === 'volume' ? '' : `数え方 ${inp(bp + '.nunit', b.nunit, 'サンプル', '70px')}`}
-        既定の数 ${inp(bp + '.n', b.n, '空欄＝毎回入力', '90px')}
-        合計(1量) ${inp(bp + '.total', b.total, '例 10', '60px')} ${inp(bp + '.total_unit', b.total_unit, 'uL', '40px')}
+        計算 <select data-bind="${bp}.mode"><option value="sample" ${b.mode !== 'volume' ? 'selected' : ''}>1量 × サンプル数</option><option value="volume" ${b.mode === 'volume' ? 'selected' : ''}>基準量あたりの量 → 作りたい量に換算（例：1Lあたり → 440mL分）</option></select>
+        ${b.mode === 'volume'
+          ? `量の基準 ${inp(bp + '.base', b.base ?? 1, '1', '50px').replace('<input', '<input data-rerender="1"')}<select data-bind="${bp}.base_unit">${Object.keys(VOL_UNITS).map(u => `<option ${(VOL_UNITS[b.base_unit] ? b.base_unit : 'L') === u ? 'selected' : ''}>${u}</option>`).join('')}</select>あたり
+             作製量の単位 <select data-bind="${bp}.make_unit">${Object.keys(VOL_UNITS).map(u => `<option ${(VOL_UNITS[b.make_unit] ? b.make_unit : 'mL') === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
+             既定の作製量 ${inp(bp + '.n', b.n, '空欄＝毎回入力', '90px')}`
+          : `数え方 ${inp(bp + '.nunit', b.nunit, 'サンプル', '70px')}
+             既定の数 ${inp(bp + '.n', b.n, '空欄＝毎回入力', '90px')}`}
+        合計(${b.mode === 'volume' ? 'あたり' : '1量'}) ${inp(bp + '.total', b.total, '例 10', '60px')} ${inp(bp + '.total_unit', b.total_unit, 'uL', '40px')}
         字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>
-        <table class="ed"><tr><th>試薬名</th><th>種類</th><th>${b.mode === 'volume' ? '濃度(/L)' : '1量'}</th><th>単位</th><th>固定の量・( )内の文字</th><th>備考（右側）</th><th>字下げ</th><th></th></tr>
+        <table class="ed"><tr><th>試薬名</th><th>種類</th><th>${b.mode === 'volume' ? esc(matVolInfo(b).per.slice(1)) + 'あたり' : '1量'}</th><th>単位</th><th>固定の量・( )内の文字</th><th>備考（右側）</th><th>字下げ</th><th></th></tr>
         ${b.rows.map((r, j) => {
           const rp = `${bp}.rows.${j}`;
           return `<tr><td>${inp(rp + '.name', r.name)}</td>
@@ -527,7 +540,8 @@ function blockEditorHtml(b, i, n) {
 function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {}) {
   const render = () => {
     el.innerHTML = `
-      ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}</div></div>` : ''}
+      ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}
+        フォルダ <select data-bind="folder">${FOLDERS.map(f => `<option ${doc.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(doc.folder) ? '' : '<option value="" selected>未分類</option>'}</select></div></div>` : ''}
       <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div>
         ${withMeta ? `<div class="row" style="margin-top:8px">タグ <span id="pe-tags">${tagBoxHtml(doc.tags || [])}</span></div>
         <div class="muted">同じタグの注意点が、このプロトコルで記録を書くときに自動で表示されます（例：PCR、無菌操作、DMSO）。</div>` : ''}</div>
@@ -1252,7 +1266,7 @@ function openNoteEditor(note, onSaved) {
   let base = note ? note.updated : null;
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal meta" style="width:min(1000px,96vw)"><h3 style="margin-top:0">${isNew ? '新しい注意点' : '注意点の編集'}</h3>
+  bg.innerHTML = `<div class="modal meta" style="width:min(1000px,calc(96vw / var(--z)))"><h3 style="margin-top:0">${isNew ? '新しい注意点' : '注意点の編集'}</h3>
     <div class="row">題名 <input type="text" data-f="title" value="${esc(d.title)}" placeholder="例：DMSOは一気に入れない" style="flex:1;min-width:260px">
       <label><input type="checkbox" data-f="important" ${d.important ? 'checked' : ''}> ★重要</label></div>
     <div class="row" style="margin-top:8px">タグ <span id="ne-tags">${tagBoxHtml(d.tags)}</span></div>
@@ -1639,6 +1653,14 @@ setInterval(async () => {
   } catch (e) { /* つながらない間は何もしない */ }
 }, 8000);
 quietGet('info').then(i => { appVersion = i.version; }).catch(() => {});
+// 画面の文字の大きさ（PCごとに覚える。印刷には影響しない）
+function setZoom(z) {
+  document.documentElement.style.setProperty('--z', z);
+  try { localStorage.setItem('jn_zoom', z); } catch (e) { /* 覚えられなくても使える */ }
+  document.querySelectorAll('[data-zoom]').forEach(b => b.classList.toggle('on', b.dataset.zoom === String(z)));
+}
+document.querySelectorAll('[data-zoom]').forEach(b => b.onclick = () => setZoom(b.dataset.zoom));
+setZoom(getComputedStyle(document.documentElement).getPropertyValue('--z').trim() || '1.2');
 async function router() {
   if (location.hash !== currentHash && !leaveOk()) { history.replaceState(null, '', currentHash); return; }
   currentHash = location.hash;
@@ -1663,7 +1685,7 @@ async function viewHome() {
     <h2>実験ノート印刷</h2>
     ${info.warn ? `<div class="card" style="background:#fff4ce;border-color:#e0c060"><b>置き場所の注意：</b>${esc(info.warn)}<div class="muted">移すときはツールを終了してから jikken-note フォルダごと移動し、「デスクトップにアイコンを作る.bat」をもう一度実行してください。</div></div>` : ''}
     <div class="card"><h3 style="margin-top:0">新しい記録を書く</h3>
-      <div class="row"><select id="psel" class="psel">${ps.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <div class="row"><select id="psel" class="psel">${protocolOptions(ps)}</select>
       <button class="primary big" id="start">このプロトコルで書く</button></div>
       <p class="muted">プロトコルを選ぶと内容がそのまま入ります。黄色の欄（可変欄）だけ入力すれば印刷できます。</p></div>
     <div class="card"><div class="row"><h3 style="margin:0">最近の記録</h3><span class="spacer"></span><a href="#/records">すべて見る →</a></div>
@@ -1683,22 +1705,56 @@ async function viewHome() {
   });
 }
 
+// プロトコルの大きな分類（フォルダ）
+const FOLDERS = ['培地', '試薬', '実験操作'];
+let pendingFolder = '';
+function folderGroups(ps) {
+  const groups = FOLDERS.map(f => ({ name: f, items: ps.filter(p => p.folder === f) }));
+  const other = ps.filter(p => !FOLDERS.includes(p.folder));
+  if (other.length) groups.push({ name: '', items: other });
+  return groups;
+}
+function protocolOptions(ps) {
+  return folderGroups(ps).filter(g => g.items.length)
+    .map(g => `<optgroup label="${esc(g.name || '未分類')}">${g.items.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</optgroup>`).join('');
+}
+function loadFolderOpen() { try { return JSON.parse(localStorage.getItem('jn_folders_closed') || '[]'); } catch (e) { return []; } }
+function saveFolderOpen(closed) { try { localStorage.setItem('jn_folders_closed', JSON.stringify(closed)); } catch (e) { /* 保存できなくても使える */ } }
 async function viewProtocols() {
   const ps = await api.get('protocols');
+  const closed = loadFolderOpen();
+  const sel = p => `<select class="small-sel" data-folder="${p.id}" title="フォルダを移す">${FOLDERS.map(f => `<option ${p.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(p.folder) ? '' : '<option value="" selected>未分類</option>'}</select>`;
+  const section = g => `<details class="card folder" data-name="${esc(g.name)}" ${closed.includes(g.name) ? '' : 'open'}>
+      <summary><span class="ftitle">📁 ${esc(g.name || '未分類')}</span><span class="muted">${g.items.length} 件</span><span class="spacer"></span>
+        ${g.name ? `<button class="small" data-newin="${esc(g.name)}">＋ ここに新しいプロトコル</button>` : ''}</summary>
+      ${g.items.length ? `<table class="list"><tr><th style="width:80px">順番</th><th>名前</th><th style="width:120px">フォルダ</th><th>更新</th><th></th></tr>
+      ${g.items.map((p, i) => `<tr><td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === g.items.length - 1 ? 'disabled' : ''}>↓</button></td>
+        <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td>${sel(p)}</td><td class="muted nowrap">${esc(p.updated.slice(0, 16))}</td>
+        <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
+        <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table>`
+      : '<p class="muted" style="margin:8px 0 0">まだありません。「＋ ここに新しいプロトコル」で作るか、ほかのフォルダの行の「フォルダ」欄で移してください。</p>'}</details>`;
+  const groups = folderGroups(ps);
   $app.innerHTML = `<div class="row"><h2>プロトコルの管理</h2><span class="spacer"></span><button class="primary" id="newp">＋ 新しいプロトコル</button></div>
     ${importCardHtml()}
-    <div class="card"><table class="list"><tr><th style="width:70px">順番</th><th>名前</th><th>更新</th><th></th></tr>
-    ${ps.map((p, i) => `<tr><td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === ps.length - 1 ? 'disabled' : ''}>↓</button></td>
-      <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td class="muted">${esc(p.updated.slice(0, 16))}</td>
-      <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
-      <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table></div>`;
-  document.getElementById('newp').onclick = () => go('#/protocol/new');
+    ${groups.some(g => !g.name) ? '<p class="muted">「未分類」のプロトコルは、行の「フォルダ」欄で 培地・試薬・実験操作 のどれかに移せます。</p>' : ''}
+    ${groups.map(section).join('')}`;
+  document.getElementById('newp').onclick = () => { pendingFolder = ''; go('#/protocol/new'); };
   bindImportCard();
   const sig = JSON.stringify(ps);
   pollFn = sameView(async () => { if (JSON.stringify(await quietGet('protocols')) !== sig) await rerenderKeepScroll(viewProtocols); });
+  $app.querySelectorAll('details.folder').forEach(d => d.ontoggle = () => {
+    const c = loadFolderOpen().filter(n => n !== d.dataset.name);
+    if (!d.open) c.push(d.dataset.name);
+    saveFolderOpen(c);
+  });
+  $app.onchange = async e => {
+    const t = e.target;
+    if (t.dataset.folder) { await api.send('POST', `protocols/${t.dataset.folder}/folder`, { folder: t.value }); toast(`「${t.value || '未分類'}」に移しました`); viewProtocols(); }
+  };
   $app.onclick = async e => {
     const t = e.target;
-    if (t.dataset.mv) { await api.send('POST', `protocols/${t.dataset.id}/move`, { dir: +t.dataset.mv }); viewProtocols(); }
+    if (t.dataset.newin) { e.preventDefault(); pendingFolder = t.dataset.newin; go('#/protocol/new'); }
+    else if (t.dataset.mv) { await api.send('POST', `protocols/${t.dataset.id}/move`, { dir: +t.dataset.mv }); viewProtocols(); }
     else if (t.dataset.dup) { await api.send('POST', `protocols/${t.dataset.dup}/duplicate`); toast('複製しました'); viewProtocols(); }
     else if (t.dataset.del) { if (confirm(`「${t.dataset.name}」を削除しますか？\n（これまでの記録は消えません）`)) { await api.send('DELETE', `protocols/${t.dataset.del}`); viewProtocols(); } }
   };
@@ -1712,6 +1768,7 @@ async function viewProtocolEdit(id) {
   else if (id === 'new') doc = { name: '', title: '', blocks: [newBlock('heading'), newBlock('steps')], memo: { text: '', print: false } };
   else { const pr = await api.get('protocols/' + id); doc = pr.data; base = pr.updated; }
   if (id === 'new' && !imported) { doc.blocks[0].text = '材料'; }
+  if (id === 'new') { if (pendingFolder && !doc.folder) doc.folder = pendingFolder; pendingFolder = ''; }
   $app.innerHTML = `<div class="toolbar"><div class="row"><h2 style="margin:0">${id === 'new' ? '新しいプロトコル' : 'プロトコルの編集'}</h2><span class="spacer"></span>
       <label><input type="checkbox" id="chem" checked> 化学式の数字を下付き</label>
       <a class="btn" href="#/protocols">一覧へ戻る</a> <button class="primary" id="save">保存</button></div></div>

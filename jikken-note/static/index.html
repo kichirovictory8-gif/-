@@ -6,6 +6,7 @@
 <title>実験ノート印刷</title>
 <link rel="icon" href="/icon.ico">
 <link rel="stylesheet" href="/style.css">
+<script>try { var z = localStorage.getItem('jn_zoom'); if (z) document.documentElement.style.setProperty('--z', z); } catch (e) {}</script>
 </head>
 <body>
 <header class="topbar no-print">
@@ -17,6 +18,9 @@
     <a href="#/notes">注意点・考え方</a>
     <a href="#/help">書き方のヘルプ</a>
   </nav>
+  <span class="zoomctl" title="画面の文字の大きさ（印刷の大きさは変わりません。PCごとに覚えます）">文字
+    <button type="button" data-zoom="1">小</button><button type="button" data-zoom="1.2">中</button><button type="button" data-zoom="1.4">大</button><button type="button" data-zoom="1.6">特大</button>
+  </span>
 </header>
 <main id="app"></main>
 <div id="toast" class="no-print"></div>

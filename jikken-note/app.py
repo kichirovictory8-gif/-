@@ -208,9 +208,11 @@ def backup(auto=False):
 
 
 def row_protocol(r, full=True):
-    d = {"id": r["id"], "name": r["name"], "sort": r["sort"], "updated": r["updated"]}
+    data = json.loads(r["data"])
+    d = {"id": r["id"], "name": r["name"], "sort": r["sort"], "updated": r["updated"],
+         "folder": data.get("folder") or ""}
     if full:
-        d["data"] = json.loads(r["data"])
+        d["data"] = data
     return d
 
 
@@ -450,6 +452,16 @@ class Handler(BaseHTTPRequestHandler):
                         (data.get("name") or "無題", srt, json.dumps(data, ensure_ascii=False), now(), now()))
                     con.commit()
                     return self.send_json({"id": cur.lastrowid})
+                if len(p) == 4 and p[3] == "folder":
+                    # フォルダの移動: body = {"folder": "培地"}
+                    r = con.execute("SELECT data FROM protocols WHERE id=?", (int(p[2]),)).fetchone()
+                    if r is None:
+                        return self.send_json({"error": "見つかりません（削除された可能性があります）"}, 404)
+                    data = json.loads(r["data"])
+                    data["folder"] = str(body.get("folder") or "")
+                    con.execute("UPDATE protocols SET data=?, updated=? WHERE id=?", (json.dumps(data, ensure_ascii=False), now(), int(p[2])))
+                    con.commit()
+                    return self.send_json({"ok": True})
                 if len(p) == 4 and p[3] == "duplicate":
                     r = con.execute("SELECT * FROM protocols WHERE id=?", (int(p[2]),)).fetchone()
                     data = json.loads(r["data"])
@@ -460,11 +472,15 @@ class Handler(BaseHTTPRequestHandler):
                     con.commit()
                     return self.send_json({"id": cur.lastrowid})
                 if len(p) == 4 and p[3] == "move":
-                    # 並べ替え: body = {"dir": -1 or 1}
-                    rows = con.execute("SELECT id FROM protocols ORDER BY sort, id").fetchall()
+                    # 並べ替え: body = {"dir": -1 or 1}。同じフォルダの中の隣と入れ替える
+                    rows = con.execute("SELECT id, data FROM protocols ORDER BY sort, id").fetchall()
                     ids = [r["id"] for r in rows]
+                    fol = [json.loads(r["data"]).get("folder") or "" for r in rows]
                     i = ids.index(int(p[2]))
-                    j = i + int(body.get("dir", 0))
+                    d = 1 if int(body.get("dir", 0)) > 0 else -1
+                    j = i + d
+                    while 0 <= j < len(ids) and fol[j] != fol[i]:
+                        j += d
                     if 0 <= j < len(ids):
                         ids[i], ids[j] = ids[j], ids[i]
                         for k, pid in enumerate(ids):

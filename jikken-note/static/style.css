@@ -257,3 +257,15 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
   .page .sheet.page-in { padding: 0 !important; width: auto !important; }
   .cutguide.on { display: block; position: fixed; inset: 0; border: 0.4pt dashed #9a9a9a; pointer-events: none; }
 }
+
+/* ===== ブロックごとの「印刷する」チェック ===== */
+.sheet.fill { margin-left: 30px; }
+.sheet.fill .block { position: relative; }
+.sheet .pchk { position: absolute; left: calc(-3mm - 26px); top: 0.15em; line-height: 1; font-family: var(--sans, sans-serif); }
+.sheet .pchk input { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.sheet.fill .block.off > :not(.pchk) { opacity: 0.35; }
+.sheet.fill .block.off { background: repeating-linear-gradient(135deg, transparent 0 6px, #f1f1f1 6px 12px); }
+.blk-head .pchk-ed { font-size: 12px; color: #555; white-space: nowrap; margin-right: 4px; }
+.blk.off { background: #f1f1f1; }
+.blk.off > :not(.blk-head) { opacity: 0.45; }
+@media print { .sheet .pchk { display: none !important; } }

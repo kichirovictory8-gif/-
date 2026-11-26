@@ -73,8 +73,9 @@ function countBlanks(doc) {
     else if (Array.isArray(v)) v.forEach(walk);
     else if (v && typeof v === 'object') for (const k in v) { if (k !== 'src') walk(v[k]); }
   };
-  walk(doc.blocks); walk(doc.title);
-  for (const b of doc.blocks) if (b.type === 'materials' && (b.n === '' || b.n == null)) c++;
+  const blocks = doc.blocks.filter(b => b.print !== false);
+  walk(blocks); walk(doc.title);
+  for (const b of blocks) if (b.type === 'materials' && (b.n === '' || b.n == null)) c++;
   return c;
 }
 
@@ -304,11 +305,13 @@ function renderHeading(b, bp, ctx) {
 function renderDoc(doc, opts = {}) {
   const mode = opts.mode || 'print';
   const ctx = { mode, chem: opts.chem !== false };
-  let h = `<div class="sheet">`;
+  let h = `<div class="sheet${mode === 'fill' ? ' fill' : ''}">`;
   if (opts.date) h += `<div class="date-line">${esc(jpDate(opts.date))}</div>`;
   h += `<h1 class="ptitle">●<u>${inlineFmt(doc.title || '', { ...ctx, path: 'title' })}</u></h1>`;
   (doc.blocks || []).forEach((b, i) => {
     const bp = `blocks.${i}`;
+    const off = b.print === false;
+    if (off && mode !== 'fill') return;   // 「印刷する」のチェックを外したブロックは印刷・印刷イメージに出さない
     const ind = +b.indent || 0;
     let inner = '';
     switch (b.type) {
@@ -323,7 +326,8 @@ function renderDoc(doc, opts = {}) {
       case 'pagebreak': inner = '<div class="pbreak"><span>改ページ（印刷ではここで次のページへ）</span></div>'; break;
       case 'gel': inner = renderGel(b, bp, ctx); break;
     }
-    h += `<div class="block" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${inner}</div>`;
+    const chk = mode === 'fill' ? `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" ${off ? '' : 'checked'}></label>` : '';
+    h += `<div class="block${off ? ' off' : ''}" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
   });
   if (opts.memo && doc.memo && doc.memo.text && doc.memo.text.trim()) {
     h += `<div class="memo"><div class="memo-h">【メモ】</div>${renderText(doc.memo.text, { ...ctx, mode: mode === 'fill' ? 'print' : mode, path: 'memo.text' })}</div>`;
@@ -513,7 +517,7 @@ function blockEditorHtml(b, i, n) {
         ${b.src ? '<span class="muted">画像あり</span>' : '<span class="muted">画像なし</span>'}</div>`;
       break;
   }
-  return `<div class="blk"><div class="blk-head"><span class="type">${BLOCK_TYPES[b.type]}</span><span class="spacer"></span>
+  return `<div class="blk${b.print === false ? ' off' : ''}"><div class="blk-head"><label class="pchk-ed" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" data-rerender="1" ${b.print === false ? '' : 'checked'}> 印刷</label><span class="type">${BLOCK_TYPES[b.type]}</span><span class="spacer"></span>
     <button type="button" class="small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
     <button type="button" class="small" data-act="down" data-i="${i}" ${i === n - 1 ? 'disabled' : ''}>↓</button>
     <button type="button" class="small" data-act="dup" data-i="${i}">複製</button>
@@ -547,7 +551,7 @@ function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {})
     if (!t.dataset.bind) return;
     applyBind(doc, t);
     if (t.dataset.live) { refreshGelPreview(el, doc, t); bindGelDrag(el, doc, () => { render(); onChange(); }); }
-    if (e.type === 'change' && (t.tagName === 'SELECT' || t.dataset.resize || t.dataset.live)) render();
+    if (e.type === 'change' && (t.tagName === 'SELECT' || t.dataset.resize || t.dataset.live || t.dataset.rerender)) render();
     onChange();
   };
   el.onclick = e => {

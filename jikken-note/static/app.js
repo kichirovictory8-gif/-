@@ -76,7 +76,10 @@ function countBlanks(doc) {
   const blocks = doc.blocks.filter(b => b.print !== false);
   walk(blocks); walk(doc.title);
   for (const b of blocks) if ((b.type === 'materials' && (b.n === '' || b.n == null)) || (b.type === 'dilution' && (b.conc === '' || b.conc == null))) c++;
-  for (const b of blocks) if (b.type === 'gibson') for (const f of b.frags || []) for (const k of ['bp', 'conc']) if (f[k] === '' || f[k] == null) c++;
+  for (const b of blocks) if (b.type === 'gibson') {
+    for (const f of b.frags || []) for (const k of ['bp', 'conc']) if (f[k] === '' || f[k] == null) c++;
+    if (b.mm && b.mm_show !== false && (b.mm.n === '' || b.mm.n == null)) c++;
+  }
   return c;
 }
 
@@ -354,9 +357,22 @@ function gibCompute(b) {
   const ready = rows.every(r => !isNaN(r.vol));
   return { rows, sum, ready, max: num(b.max) || 5, mult: num(b.mult) || 1 };
 }
+// Master mix（1倍量で合計 15uL。stMilliQ は残り）。試薬と量の計算（1量 × 倍量）をそのまま使う
+const DEFAULT_GIB_MM = () => ({
+  type: 'materials', label: '【Master mix】', mode: 'sample', nunit: '倍量', n: '', total: '15', total_unit: 'uL',
+  rows: [
+    { name: 'stMilliQ', kind: 'rest', per1: '', unit: 'uL', note: '残り量の調製' },
+    { name: '5×ISO rxn buffer (-NAD , -dNTP)', kind: 'calc', per1: '4', unit: 'uL', note: '「5×Gibson」の EP' },
+    { name: '4×2.5mM dNTPs', kind: 'calc', per1: '1.6', unit: 'uL', note: '' },
+    { name: 'T5 exo(0.4U/uL)（1×ISO で 1/25 に希釈する）', kind: 'calc', per1: '0.2', unit: 'uL', note: '' },
+    { name: 'Prime Star HS DNA Polymerase(2.5U/uL)', kind: 'calc', per1: '0.2', unit: 'uL', note: '' },
+  ],
+});
 function renderGibson(b, bp, ctx) {
+  if (!b.mm) b.mm = DEFAULT_GIB_MM();   // 以前に作った Gibson ブロックにも Master mix を出す
   const g = gibCompute(b);
   const sub = { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode };
+  const f2 = x => isNaN(x) || !isFinite(x) ? '' : x.toFixed(2);   // 必要量は小数第2位まで
   const f3 = x => isNaN(x) || !isFinite(x) ? '' : x.toFixed(3);
   const calc = (txt, w = '3em') => txt ? `<span class="vf calc">${esc(txt)}</span>` : `<span class="vf blank" style="min-width:${w}">&nbsp;</span>`;
   const field = (path, val, ph, w) => ctx.mode === 'fill'
@@ -370,30 +386,53 @@ function renderGibson(b, bp, ctx) {
     <td class="num">${r.k === 0 ? esc(fmtNum(num(b.vec_mass))) : calc(isNaN(r.mass) ? '' : r.mass.toFixed(1))}</td>
     <td class="num">${calc(f3(r.pmol))}</td>
     <td class="num">${field(`${bp}.frags.${r.k}.conc`, r.f.conc, 'ng/uL', '4em')}</td>
-    <td class="num need">${calc(f3(r.vol))}</td>${multCol ? `<td class="num need">${calc(f3(r.vol * g.mult))}</td>` : ''}</tr>`).join('');
-  const over = g.ready && g.sum > g.max + 1e-9;
-  const sumRow = `<tr class="sum"><td class="lft" colspan="7">合計</td><td class="num need">${g.ready ? `<span class="${over ? 'red' : ''}">${f3(g.sum)}</span>` : calc('')}</td>${multCol ? `<td class="num need">${g.ready ? f3(g.sum * g.mult) : calc('')}</td>` : ''}</tr>`;
-  const msg = !g.ready ? '' : over
-    ? `<div class="gib-msg red">合計が ${fmtNum(g.max)} uL を超えています（${f3(g.sum)} uL）。断片を混ぜて減圧乾燥で濃縮し、${fmtNum(g.max)} uL 以下にしてください。</div>`
-    : `<div class="gib-msg">合計 ${f3(g.sum)} uL（${fmtNum(g.max)} uL 以内）${g.max - g.sum > 1e-9 ? `／水で ${fmtNum(g.max)} uL にする場合は ＋${f3(g.max - g.sum)} uL` : ''}</div>`;
+    <td class="num need">${calc(f2(r.vol))}</td>${multCol ? `<td class="num need">${calc(f2(r.vol * g.mult))}</td>` : ''}</tr>`).join('');
   const head = `<div class="blk-h">【${inlineFmt(b.label || 'Gibson assembly', sub)}】<span class="extra">${b.note ? inlineFmt(b.note, sub) : ''}</span></div>`;
-  const table = `<table class="grid gib-t"><tr class="hr"><td></td><td>断片名</td><td>長さ<br>(bp)</td><td>分子量<br>(g/mol)</td><td>質量<br>(ng)</td><td>モル<br>(pmol)</td><td>濃度<br>(ng/uL)</td><td>必要量<br>(uL)</td>${multCol ? `<td>×${esc(fmtNum(g.mult))}<br>(uL)</td>` : ''}</tr>${trs}${sumRow}</table>`;
-  return `<div class="gib">${head}${table}${msg}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（insert の数・比率・倍量など）</summary>${gibEdHtml(b, bp)}</details>` : '');
+  const table = `<table class="grid gib-t"><tr class="hr"><td></td><td>断片名</td><td>長さ<br>(bp)</td><td>分子量<br>(g/mol)</td><td>質量<br>(ng)</td><td>モル<br>(pmol)</td><td>濃度<br>(ng/uL)</td><td>必要量<br>(uL)</td>${multCol ? `<td>×${esc(fmtNum(g.mult))}<br>(uL)</td>` : ''}</tr>${trs}</table>`;
+  // 断片（サンプル）＝vector＋insert＋stMilliQ、断片（Control）＝vector＋stMilliQ。どちらも合計 g.max uL
+  const water = esc(b.water || 'stMilliQ');
+  const mix = (title, rows) => {
+    const ready = rows.every(r => !isNaN(r.vol));
+    const sum = rows.reduce((a, r) => a + (isNaN(r.vol) ? 0 : r.vol), 0);
+    const over = ready && sum > g.max + 1e-9;
+    const nm = r => `${r.k === 0 ? 'vector' : 'insert'}${r.f.name ? `（${inlineFmt(r.f.name, sub)}）` : ''}`;
+    const tr = rows.map(r => `<tr><td class="nm">・${nm(r)}</td><td>：</td><td class="amt">${calc(f2(r.vol))}uL</td></tr>`).join('')
+      + `<tr><td class="nm">・${water}</td><td>：</td><td class="amt">${ready && !over ? calc(f2(g.max - sum)) : calc('')}uL</td></tr>`
+      + `<tr class="total"><td class="nm">　Total</td><td>：</td><td class="amt">${esc(fmtNum(g.max))}uL</td></tr>`;
+    const warn = over ? `<div class="gib-msg red">断片の合計が ${f2(sum)} uL で ${esc(fmtNum(g.max))} uL を超えています。減圧乾燥で濃縮してから ${water} で ${esc(fmtNum(g.max))} uL にしてください。</div>` : '';
+    return `<div class="gib-mix"><div>〈${title}〉</div><table class="mat-t">${tr}</table>${warn}</div>`;
+  };
+  const mixes = `<div class="gib-mixes">${mix('断片（サンプル）', g.rows)}${b.control !== false ? mix('断片（Control）', g.rows.slice(0, 1)) : ''}</div>`;
+  const mm = b.mm_show !== false ? `<div class="gib-mm">${renderMaterials(b.mm, `${bp}.mm`, ctx)}</div>` : '';
+  return `<div class="gib">${head}${table}${mixes}${mm}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（insert の数・比率・倍量・Master mix など）</summary>${gibEdHtml(b, bp)}</details>` : '');
 }
 function gibEdHtml(b, bp) {
   const fr = b.frags || [];
+  if (!b.mm) b.mm = DEFAULT_GIB_MM();
+  const mp = `${bp}.mm`;
   return `<div class="row">見出し ${inp(bp + '.label', b.label, 'Gibson assembly', '150px')} 続けて ${inp(bp + '.note', b.note, '（任意）', '160px')}
     vector の質量 ${inp(bp + '.vec_mass', b.vec_mass, '50', '50px')} ng
     insert の比率（vector=1） ${inp(bp + '.ratio', b.ratio, '1', '40px')}
-    合計の上限 ${inp(bp + '.max', b.max, '5', '40px')} uL
     倍量 × ${inp(bp + '.mult', b.mult, '1', '40px')}</div>
+    <div class="row" style="margin-top:6px">断片の合計 ${inp(bp + '.max', b.max, '5', '40px')} uL（${inp(bp + '.water', b.water, 'stMilliQ', '90px')} で合わせる）
+    <label><input type="checkbox" data-bind="${bp}.control" ${b.control !== false ? 'checked' : ''}> 断片（Control）＝vector＋${esc(b.water || 'stMilliQ')} も表示</label></div>
     <table class="ed" style="margin-top:6px"><tr><th></th><th>断片名</th><th>長さ(bp)</th><th>濃度(ng/uL)</th><th>比率（空欄＝共通）</th><th></th></tr>
     ${fr.map((f, k) => `<tr><td>${k === 0 ? 'vector' : 'insert ' + k}</td><td>${inp(`${bp}.frags.${k}.name`, f.name, k === 0 ? '例：pHK197④' : '例：pHK197③')}</td>
       <td>${inp(`${bp}.frags.${k}.bp`, f.bp, '', '70px')}</td><td>${inp(`${bp}.frags.${k}.conc`, f.conc, '', '70px')}</td>
       <td>${k === 0 ? '' : inp(`${bp}.frags.${k}.ratio`, f.ratio, b.ratio || '1', '50px')}</td>
       <td>${k === 0 || fr.length <= 2 ? '' : `<button type="button" class="small" data-fig="gib-del" data-path="${bp}" data-k="${k}">×</button>`}</td></tr>`).join('')}</table>
     <button type="button" class="small" data-fig="gib-add" data-path="${bp}">＋ insert を追加</button>
-    <div class="muted">長さ・濃度・断片名を空欄にしておくと、記録の入力画面で毎回入力する黄色の欄になります。分子量は 長さ × 660 で計算します。</div>`;
+    <div class="muted">長さ・濃度・断片名を空欄にしておくと、記録の入力画面で毎回入力する黄色の欄になります。分子量は 長さ × 660 で計算します。</div>
+    <div class="row" style="margin-top:10px"><b>Master mix</b>（1倍量の合計 ${inp(mp + '.total', b.mm.total, '15', '40px')} uL、残りの行は合計から自動）
+      既定の倍量 ${inp(mp + '.n', b.mm.n, '空欄＝毎回入力', '90px')}
+      <label><input type="checkbox" data-bind="${bp}.mm_show" ${b.mm_show !== false ? 'checked' : ''}> 表示する</label>
+      <button type="button" class="small" data-fig="gmm-add" data-path="${bp}">＋ 試薬を追加</button>
+      <button type="button" class="small" data-fig="gmm-reset" data-path="${bp}">初期値に戻す</button></div>
+    <table class="ed"><tr><th>試薬名</th><th>種類</th><th>1倍量</th><th>単位</th><th>備考（右側）</th><th></th></tr>
+    ${b.mm.rows.map((r, j) => `<tr><td>${inp(`${mp}.rows.${j}.name`, r.name)}</td>
+      <td><select data-bind="${mp}.rows.${j}.kind" data-rerender="1"><option value="calc" ${r.kind !== 'rest' ? 'selected' : ''}>量</option><option value="rest" ${r.kind === 'rest' ? 'selected' : ''}>残り（合計−他）</option></select></td>
+      <td>${r.kind === 'rest' ? '' : inp(`${mp}.rows.${j}.per1`, r.per1, '', '60px')}</td><td>${inp(`${mp}.rows.${j}.unit`, r.unit, 'uL', '44px')}</td>
+      <td>${inp(`${mp}.rows.${j}.note`, r.note)}</td><td><button type="button" class="small" data-fig="gmm-del" data-path="${bp}" data-k="${j}">×</button></td></tr>`).join('')}</table>`;
 }
 function renderTable(b, bp, ctx) {
   let h = `<table class="grid${b.full ? ' full' : ''}">`;
@@ -541,7 +580,7 @@ function newBlock(type) {
     case 'pcr': return { type, label: 'PCR', steps: [{ t: '98℃', d: '30sec' }, { t: '98℃', d: '10sec' }, { t: '[[アニール温度]]℃', d: '5sec' }, { t: '72℃', d: '[[伸長時間]]' }, { t: '4℃', d: '∞' }], cyc_from: 1, cyc_to: 3, cyc_text: '×[[サイクル数=30]]サイクル' };
     case 'image': return { type, src: '', width: 100 };
     case 'pagebreak': return { type };
-    case 'gibson': return { type, label: 'Gibson assembly', note: '', vec_mass: '50', ratio: '1', max: '5', mult: '1', frags: [{ name: '', bp: '', conc: '' }, { name: '', bp: '', conc: '', ratio: '' }] };
+    case 'gibson': return { type, label: 'Gibson assembly', note: '', vec_mass: '50', ratio: '1', max: '5', mult: '1', water: 'stMilliQ', control: true, mm_show: true, mm: DEFAULT_GIB_MM(), frags: [{ name: '', bp: '', conc: '' }, { name: '', bp: '', conc: '', ratio: '' }] };
     case 'dilution': return { type, label: '鋳型DNA', name: '', conc: '', conc_unit: 'ng/uL', per_rxn: '1', factor: '10', make: '100', diluent: '1/10TE', marks: 'circle', show_stock: true, rows: Array.from({ length: 5 }, () => ({ f: '', note: '' })) };
     case 'tubes': return { type, label: '8連チューブ', count: 8, strip: true, legend: true, tubes: Array.from({ length: 8 }, (_, k) => ({ mark: String(k + 1), name: '', kind: 's', vol: '' })) };
     case 'gel': return { type, label: '電気泳動', note: '', gel_show: true, gel_size: 'small', gel_big: 2, gel: clone(DEFAULT_GEL_RECIPE), mix_label: '泳動サンプル（1レーンあたり）', mix_show: true, mix: clone(DEFAULT_GEL_MIX), src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
@@ -1123,10 +1162,22 @@ function gelImgBox(b, extra = '') {
   return `<div class="g-img" style="aspect-ratio:${ar}"><img src="${b.src}" alt="" style="width:${100 / fw}%;left:${-c.l / fw}%;top:${-c.t / fh}%;filter:brightness(${b.bright || 100}%) contrast(${b.contrast || 100}%)">${extra}</div>`;
 }
 // ゲルの作り方（小ゲルの量。大ゲルは自動で2倍）
-const DEFAULT_GEL_RECIPE = [{ name: '1×TAE', amt: '20', unit: 'mL', ref: '' }, { name: 'Agarose', amt: '0.14', unit: 'g', ref: '(0.7%)' }, { name: 'EtBr', amt: '1', unit: 'uL', ref: '' }];
+//   kind: 'pct' の行（Agarose）は「%(w/v) × 最初の mL の行の量」で g を計算する
+const DEFAULT_GEL_RECIPE = [{ name: '1×TAE', amt: '20', unit: 'mL', ref: '' }, { name: 'Agarose', kind: 'pct', pct: '0.7', unit: 'g', ref: '' }, { name: 'EtBr', amt: '1', unit: 'uL', ref: '' }];
+function gelRows(b) {
+  // 以前の形（Agarose を g で直接書いていた）は % の行として扱う
+  return (b.gel || DEFAULT_GEL_RECIPE).map(r => {
+    if (r.kind === undefined && /agarose/i.test(r.name || '')) {
+      const m = String(r.ref || '').match(/([\d.]+)\s*%/);
+      return { ...r, kind: 'pct', pct: m ? m[1] : '0.7', ref: '' };
+    }
+    return r;
+  });
+}
 function gelRecipeHtml(b, bp, ctx) {
   if (b.gel_show === false) return '';
-  const rows = (b.gel || DEFAULT_GEL_RECIPE).filter(r => r.name || r.amt);
+  const rows = gelRows(b).map((r, j) => ({ ...r, j })).filter(r => r.name || r.amt || r.kind === 'pct');
+  const baseRow = rows.find(r => r.kind !== 'pct' && /^ml$/i.test(String(r.unit || '').trim()) && !isNaN(num(r.amt)));
   if (!rows.length) return '';
   const big = b.gel_size === 'large', k = big ? (num(b.gel_big) || 2) : 1;
   const sub = { ...ctx, mode: 'print' };
@@ -1134,9 +1185,20 @@ function gelRecipeHtml(b, bp, ctx) {
     ? `<select class="no-print-sel" data-bind="${bp}.gel_size"><option value="small" ${big ? '' : 'selected'}>小ゲル</option><option value="large" ${big ? 'selected' : ''}>大ゲル</option></select>`
     : (big ? '大ゲル' : '小ゲル');
   const tr = rows.map(r => {
-    const v = num(r.amt);
-    const a = isNaN(v) ? inlineFmt(r.amt || '', sub) : fmtNum(v * k);
-    return `<tr><td class="nm">・${inlineFmt(r.name, sub)}</td><td>：</td><td class="amt">${a}${esc(r.unit || '')}</td><td>${r.ref ? inlineFmt(r.ref, sub) : ''}</td></tr>`;
+    let a, ref = r.ref ? inlineFmt(r.ref, sub) : '';
+    if (r.kind === 'pct') {
+      const pc = num(r.pct);
+      const g = baseRow ? pc / 100 * num(baseRow.amt) * k : NaN;
+      a = isNaN(g) ? '<span class="vf blank" style="min-width:2.5em">&nbsp;</span>' : fmtNum(g);
+      const pin = ctx.mode === 'fill'
+        ? `<input class="vin" data-num="1" data-path="${bp}.gel.${r.j}.pct" data-key="${bp}.gel.${r.j}.pct" value="${esc(r.pct ?? '')}" style="width:3em">`
+        : (isNaN(pc) ? '<span class="vf blank" style="min-width:2em">&nbsp;</span>' : fmtNum(pc));
+      ref = `(${pin}%)` + (ref ? ' ' + ref : '');
+    } else {
+      const v = num(r.amt);
+      a = isNaN(v) ? inlineFmt(r.amt || '', sub) : fmtNum(v * k);
+    }
+    return `<tr><td class="nm">・${inlineFmt(r.name, sub)}</td><td>：</td><td class="amt">${a}${esc(r.unit || '')}</td><td>${ref}</td></tr>`;
   }).join('');
   return `<div class="gel-mix gel-recipe"><div>〈${title}〉</div><table class="mat-t">${tr}</table></div>`;
 }
@@ -1205,7 +1267,7 @@ function gelPreviewHtml(b, bp) {
 }
 function gelEdHtml(b, bp) {
   if (!b.mix) b.mix = clone(DEFAULT_GEL_MIX);
-  if (!b.gel) b.gel = clone(DEFAULT_GEL_RECIPE);
+  b.gel = gelRows(b).map(r => ({ ...r }));
   if (b.mix_label === undefined) b.mix_label = '泳動サンプル（1レーンあたり）';
   const c = b.crop || { t: 0, b: 0, l: 0, r: 0 };
   const sl = (key, label, val, min, max) => `<label class="sl">${label}<input type="range" min="${min}" max="${max}" step="1" data-bind="${bp}.${key}" data-num="1" data-live="1" value="${val}"><span>${val}</span></label>`;
@@ -1217,8 +1279,10 @@ function gelEdHtml(b, bp) {
       大ゲルは小ゲルの ${inp(bp + '.gel_big', b.gel_big ?? 2, '2', '40px')} 倍
       <label><input type="checkbox" data-bind="${bp}.gel_show" ${b.gel_show !== false ? 'checked' : ''}> 表示する</label>
       <button type="button" class="small" data-fig="gel-add" data-path="${bp}">＋ 材料を追加</button>
-      <button type="button" class="small" data-fig="gel-reset" data-path="${bp}">初期値（1×TAE 20mL・Agarose 0.14g・EtBr 1uL）に戻す</button></div>
-    <table class="ed"><tr><th>材料</th><th>小ゲルの量</th><th>単位</th><th>( )内など</th><th></th></tr>${b.gel.map((m, k) => `<tr><td>${inp(`${bp}.gel.${k}.name`, m.name, '例：1×TAE')}</td><td>${inp(`${bp}.gel.${k}.amt`, m.amt, '20', '70px')}</td><td>${inp(`${bp}.gel.${k}.unit`, m.unit, 'mL', '50px')}</td><td>${inp(`${bp}.gel.${k}.ref`, m.ref, '(0.7%)', '90px')}</td>
+      <button type="button" class="small" data-fig="gel-reset" data-path="${bp}">初期値（1×TAE 20mL・Agarose 0.7%・EtBr 1uL）に戻す</button></div>
+    <table class="ed"><tr><th>材料</th><th>量の決め方</th><th>小ゲルの量 ／ 濃度</th><th>単位</th><th>( )内など</th><th></th></tr>${b.gel.map((m, k) => `<tr><td>${inp(`${bp}.gel.${k}.name`, m.name, '例：1×TAE')}</td>
+      <td><select data-bind="${bp}.gel.${k}.kind" data-rerender="1"><option value="amt" ${m.kind !== 'pct' ? 'selected' : ''}>量を書く</option><option value="pct" ${m.kind === 'pct' ? 'selected' : ''}>%(w/v)から計算</option></select></td>
+      <td>${m.kind === 'pct' ? `${inp(`${bp}.gel.${k}.pct`, m.pct, '0.7', '50px')} %（× 最初の mL の行）` : inp(`${bp}.gel.${k}.amt`, m.amt, '20', '70px')}</td><td>${inp(`${bp}.gel.${k}.unit`, m.unit, 'mL', '50px')}</td><td>${inp(`${bp}.gel.${k}.ref`, m.ref, '', '90px')}</td>
       <td><button type="button" class="small" data-fig="gel-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>
     <div class="row" style="margin-top:6px"><b>泳動サンプルの試薬</b> 見出し ${inp(bp + '.mix_label', b.mix_label, '空欄なら見出しなし', '200px')}
       <label><input type="checkbox" data-bind="${bp}.mix_show" ${b.mix_show !== false ? 'checked' : ''}> 表示する</label>
@@ -1260,6 +1324,9 @@ function figAction(doc, t) {
     case 'gel-reset': b.gel = clone(DEFAULT_GEL_RECIPE); return true;
     case 'gib-add': (b.frags = b.frags || []).push({ name: '', bp: '', conc: '', ratio: '' }); return true;
     case 'gib-del': b.frags.splice(+t.dataset.k, 1); return true;
+    case 'gmm-add': (b.mm = b.mm || DEFAULT_GIB_MM()).rows.push({ name: '', kind: 'calc', per1: '', unit: 'uL', note: '' }); return true;
+    case 'gmm-del': b.mm.rows.splice(+t.dataset.k, 1); return true;
+    case 'gmm-reset': b.mm = DEFAULT_GIB_MM(); return true;
     case 'mk-del': b.markers.splice(+t.dataset.k, 1); return true;
     case 'from-tubes': {
       const gi = doc.blocks.indexOf(b);

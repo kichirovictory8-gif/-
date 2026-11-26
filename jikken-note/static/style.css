@@ -335,3 +335,7 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .sheet table.gib-t tr.sum td { border-top: 1pt solid #000; }
 .sheet .gib-msg { margin: 0 0 0 1em; font-size: 9.5pt; }
 .blk-head .badge { font-size: 12px; color: #1f5fa8; background: #e8f1fb; border-radius: 4px; padding: 1px 6px; }
+.sheet .gib-mixes { display: flex; gap: 10mm; flex-wrap: wrap; align-items: flex-start; margin: 1mm 0 0 1em; }
+.sheet .gib-mix table.mat-t td.nm { min-width: 30mm; }
+.sheet .gib-mix .gib-msg { margin: 0; max-width: 70mm; }
+.sheet .gib-mm { margin-top: 1.5mm; }

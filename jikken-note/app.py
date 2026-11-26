@@ -53,8 +53,10 @@ button{font:inherit;font-size:16px;margin-top:14px;width:100%;padding:10px;borde
 <div class="note">合言葉は、このツールを管理している人に聞いてください。<br>一度入力すると、このPCでは30日間入力不要です。</div>
 </form><script>
 document.getElementById('f').onsubmit=async e=>{e.preventDefault();
- const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
- if(r.ok){location.reload();}else{document.getElementById('err').textContent='合言葉が違います（全角・半角、大文字・小文字も確認してください）';}};
+ const err=document.getElementById('err');err.textContent='確認中…';
+ try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+ if(r.ok){location.reload();}else{err.textContent='合言葉が違います（半角英数字か、大文字・小文字も確認してください）';}}
+ catch(x){err.textContent='ツールを起動しているPCにつながりません。黒い画面が開いているか確認してください';}};
 </script></body></html>"""
 
 
@@ -271,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             return True
         for part in (self.headers.get("Cookie") or "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k == COOKIE and hmac.compare_digest(v, auth_token()):
+            if k == COOKIE and same(v, auth_token()):
                 return True
         h = self.headers.get("Authorization", "")
         if h.startswith("Basic "):
@@ -304,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def login(self):
         body = self.read_json()
-        if PASSWORD and hmac.compare_digest(norm_pw(body.get("password", "")), PASSWORD):
+        typed = norm_pw(body.get("password", ""))
+        if PASSWORD and same(typed, PASSWORD):
             out = b'{"ok": true}'
             self.send_response(200)
             self.send_header("Set-Cookie", f"{COOKIE}={auth_token()}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax")
@@ -313,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(out)
         else:
+            why = "（かな・漢字が入っていました。半角英数字に切り替えて入力）" if not pw_ok(typed) else ""
+            print(f"[{datetime.now():%H:%M}] {self.client_address[0]} から合言葉が違うログインがありました{why}")
             self.send_json({"error": "合言葉が違います"}, 403)
 
     def shortcut(self):
@@ -551,6 +556,11 @@ def already_running():
 def norm_pw(s):
     """全角の英数字は半角にそろえる（ｋｋｋ → kkk）"""
     return unicodedata.normalize("NFKC", str(s or "")).strip()
+
+
+def same(a, b):
+    """かな・漢字が入っていても止まらないよう、バイト列で比べる"""
+    return hmac.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
 
 
 def pw_ok(s):

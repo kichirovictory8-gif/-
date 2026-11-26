@@ -388,7 +388,7 @@ function newBlock(type) {
     case 'image': return { type, src: '', width: 100 };
     case 'pagebreak': return { type };
     case 'tubes': return { type, label: '8連チューブ', count: 8, strip: true, legend: true, tubes: Array.from({ length: 8 }, (_, k) => ({ mark: String(k + 1), name: '', kind: 's', vol: '' })) };
-    case 'gel': return { type, label: '電気泳動', note: '', src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
+    case 'gel': return { type, label: '電気泳動', note: '', mix_label: '泳動サンプル（1レーンあたり）', mix_show: true, mix: clone(DEFAULT_GEL_MIX), src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
   }
 }
 let lastField = null;
@@ -508,8 +508,8 @@ function blockEditorHtml(b, i, n) {
     case 'pagebreak': body = '<div class="muted">印刷するとき、ここで必ず次のページに送ります。それ以外の場所は、項目や画像の途中で切れないように自動で分けます。</div>'; break;
     case 'gel': body = gelEdHtml(b, bp); break;
     case 'image':
-      body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（PNG・JPEG など）</span></div>
-        <div class="row"><input type="file" accept="image/*" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
+      body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（TIFF・PNG・JPEG など）</span></div>
+        <div class="row"><input type="file" accept="image/*,.tif,.tiff" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
         ${b.src ? '<span class="muted">画像あり</span>' : '<span class="muted">画像なし</span>'}</div>`;
       break;
   }
@@ -874,7 +874,7 @@ let imageDropHandler = null;
     const files = [...e.dataTransfer.files];
     if (!files.length) return;
     if (z && imageDropHandler && document.body.contains(z)) { imageDropHandler(+z.dataset.imgdrop, files[0]); return; }
-    const docs = files.filter(f => !/^image\//.test(f.type));
+    const docs = files.filter(f => !isImageFile(f));
     if (!docs.length) { alert('画像は、プロトコル編集画面の「画像」ブロックの枠にドロップしてください。'); return; }
     importFiles(docs);
   });
@@ -949,8 +949,25 @@ function gelImgBox(b, extra = '') {
   const ar = (b.nw && b.nh) ? (b.nw * fw) / (b.nh * fh) : 1.4;
   return `<div class="g-img" style="aspect-ratio:${ar}"><img src="${b.src}" alt="" style="width:${100 / fw}%;left:${-c.l / fw}%;top:${-c.t / fh}%;filter:brightness(${b.bright || 100}%) contrast(${b.contrast || 100}%)">${extra}</div>`;
 }
+const DEFAULT_GEL_MIX = [{ name: 'DNA', amt: '1uL' }, { name: '6×LD', amt: '2uL' }, { name: '1/10TE', amt: '9uL' }];
+function gelMixHtml(b, ctx) {
+  if (b.mix_show === false) return '';
+  const mix = (b.mix || DEFAULT_GEL_MIX).filter(m => m.name || m.amt);
+  if (!mix.length) return '';
+  const sub = { ...ctx, mode: 'print' };
+  // 量が同じ単位の数字なら合計も出す
+  let total = null, unit = null;
+  for (const m of mix) {
+    const mm = stripMarks(m.amt || '').normalize('NFKC').match(/^\s*([\d.]+)\s*([a-zA-Zµμ]+)\s*$/);
+    if (!mm || (unit && unit !== mm[2])) { total = null; break; }
+    unit = mm[2]; total = (total || 0) + parseFloat(mm[1]);
+  }
+  const rows = mix.map(m => `<tr><td class="nm">・${inlineFmt(m.name, sub)}</td><td>：</td><td class="amt">${inlineFmt(m.amt, sub)}</td></tr>`).join('');
+  const tot = total !== null && mix.length > 1 ? `<tr class="total"><td class="nm">　合計</td><td>：</td><td class="amt">${fmtNum(total)}${esc(unit)}</td></tr>` : '';
+  return `<div class="gel-mix">${b.mix_label !== '' ? `<div>〈${inlineFmt(b.mix_label ?? '泳動サンプル（1レーンあたり）', sub)}〉</div>` : ''}<table class="mat-t">${rows}${tot}</table></div>`;
+}
 function renderGel(b, bp, ctx) {
-  const head = b.label ? `<div class="blk-h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】${b.note ? `<span class="extra">${inlineFmt(b.note, { ...ctx, mode: 'print' })}</span>` : ''}</div>` : '';
+  const head = (b.label ? `<div class="blk-h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】${b.note ? `<span class="extra">${inlineFmt(b.note, { ...ctx, mode: 'print' })}</span>` : ''}</div>` : '') + gelMixHtml(b, ctx);
   if (!b.src) {
     const ph = `<div class="gel-empty">（泳動画像なし）</div>`;
     return head + ph + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
@@ -989,13 +1006,21 @@ function gelPreviewHtml(b, bp) {
     <div class="muted">青い縦線＝レーンの位置、オレンジの横線＝マーカーの目盛り。線をドラッグして合わせてください。</div>`;
 }
 function gelEdHtml(b, bp) {
+  if (!b.mix) b.mix = clone(DEFAULT_GEL_MIX);
+  if (b.mix_label === undefined) b.mix_label = '泳動サンプル（1レーンあたり）';
   const c = b.crop || { t: 0, b: 0, l: 0, r: 0 };
   const sl = (key, label, val, min, max) => `<label class="sl">${label}<input type="range" min="${min}" max="${max}" step="1" data-bind="${bp}.${key}" data-num="1" data-live="1" value="${val}"><span>${val}</span></label>`;
   const idx = bp.split('.')[1];
   return `<div class="row">見出し ${inp(bp + '.label', b.label, '電気泳動', '120px')} 続けて ${inp(bp + '.note', b.note, '例：1% アガロースゲル', '200px')}
       表示の幅 ${inp(bp + '.width', b.width, '80', '44px')} %</div>
-    <div class="imgdrop" data-imgdrop="${idx}">${b.src ? '<span>別の画像に替えるときは、ここにドラッグ＆ドロップ</span>' : '<span>ここに泳動画像をドラッグ＆ドロップ（PNG・JPEG など）</span>'}</div>
-    <div class="row"><input type="file" accept="image/*" data-act="img" data-i="${idx}"></div>
+    <div class="row" style="margin-top:6px"><b>泳動サンプルの試薬</b> 見出し ${inp(bp + '.mix_label', b.mix_label, '空欄なら見出しなし', '200px')}
+      <label><input type="checkbox" data-bind="${bp}.mix_show" ${b.mix_show !== false ? 'checked' : ''}> 表示する</label>
+      <button type="button" class="small" data-fig="mix-add" data-path="${bp}">＋ 試薬を追加</button>
+      <button type="button" class="small" data-fig="mix-reset" data-path="${bp}">初期値（DNA 1uL・6×LD 2uL・1/10TE 9uL）に戻す</button></div>
+    <table class="ed"><tr><th>試薬</th><th>量</th><th></th></tr>${b.mix.map((m, k) => `<tr><td>${inp(`${bp}.mix.${k}.name`, m.name, '例：DNA')}</td><td>${inp(`${bp}.mix.${k}.amt`, m.amt, '例：1uL', '90px')}</td>
+      <td><button type="button" class="small" data-fig="mix-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>
+    <div class="imgdrop" data-imgdrop="${idx}">${b.src ? '<span>別の画像に替えるときは、ここにドラッグ＆ドロップ</span>' : '<span>ここに泳動画像をドラッグ＆ドロップ（TIFF・PNG・JPEG など）</span>'}</div>
+    <div class="row"><input type="file" accept="image/*,.tif,.tiff" data-act="img" data-i="${idx}"></div>
     ${b.src ? `<div class="sliders">
       <b>切り抜き</b>${sl('crop.t', '上', c.t, 0, 45)}${sl('crop.b', '下', c.b, 0, 45)}${sl('crop.l', '左', c.l, 0, 45)}${sl('crop.r', '右', c.r, 0, 45)}
       <br><b>明るさ</b>${sl('bright', '明るさ', b.bright || 100, 30, 300)}${sl('contrast', 'コントラスト', b.contrast || 100, 30, 300)}
@@ -1020,6 +1045,9 @@ function figAction(doc, t) {
     case 'equalize': equalizeLanes(b); return true;
     case 'reset-img': b.crop = { t: 0, b: 0, l: 0, r: 0 }; b.bright = 100; b.contrast = 100; return true;
     case 'mk-add': (b.markers = b.markers || []).push({ label: '', y: 50 }); return true;
+    case 'mix-add': (b.mix = b.mix || clone(DEFAULT_GEL_MIX)).push({ name: '', amt: '' }); return true;
+    case 'mix-del': b.mix.splice(+t.dataset.k, 1); return true;
+    case 'mix-reset': b.mix = clone(DEFAULT_GEL_MIX); return true;
     case 'mk-del': b.markers.splice(+t.dataset.k, 1); return true;
     case 'from-tubes': {
       const gi = doc.blocks.indexOf(b);
@@ -1057,22 +1085,92 @@ function bindGelDrag(root, doc, onDone) {
     };
   });
 }
+// 画像ファイルかどうか（TIFF は種類が空で来ることがあるので拡張子でも判断）
+const IMG_EXT = /\.(tiff?|png|jpe?g|gif|bmp|webp)$/i;
+const isImageFile = f => /^image\//.test(f.type || '') || IMG_EXT.test(f.name || '');
+const isTiff = f => /tiff/i.test(f.type || '') || /\.tiff?$/i.test(f.name || '');
+const IMG_MAX = 2400;   // 長い辺がこれより大きい画像は縮めて保存（データが重くならないように）
+function canvasToUrl(cv, preferPng) {
+  const png = cv.toDataURL('image/png');
+  if (preferPng && png.length < 4.5e6) return png;
+  return cv.toDataURL('image/jpeg', 0.92);
+}
+// TIFF を読み取って PNG にする（16ビットの白黒は明るさを自動で整える）
+async function tiffToCanvas(file) {
+  await loadScript('/vendor/utif/pako_inflate.min.js');
+  await loadScript('/vendor/utif/UTIF.js');
+  const buf = await file.arrayBuffer();
+  const ifds = UTIF.decode(buf);
+  let best = null;
+  for (const ifd of ifds) {
+    try { UTIF.decodeImage(buf, ifd, ifds); } catch (e) { continue; }
+    if (ifd.width && (!best || ifd.width * ifd.height > best.width * best.height)) best = ifd;
+  }
+  if (!best) throw new Error('TIFF の中に画像が見つかりませんでした');
+  const w = best.width, h = best.height;
+  const bps = best.t258 ? best.t258[0] : 1, spp = best.t277 ? best.t277[0] : 1, intp = best.t262 ? best.t262[0] : 2;
+  let rgba;
+  if (bps === 16 && (spp === 1 || spp === 3 || spp === 4)) {
+    // 16ビット：少し外れた明るさ（上下0.1%）を除いて 0〜255 に広げる
+    const d = best.data, n = w * h, hist = new Uint32Array(65536);
+    const val = (pix, c) => d[(pix * spp + c) * 2] | (d[(pix * spp + c) * 2 + 1] << 8);
+    for (let k = 0; k < n; k++) hist[val(k, 0)]++;
+    let lo = 0, hi = 65535, acc = 0;
+    for (; lo < 65535; lo++) { acc += hist[lo]; if (acc > n * 0.001) break; }
+    acc = 0;
+    for (; hi > 0; hi--) { acc += hist[hi]; if (acc > n * 0.001) break; }
+    if (hi <= lo) { lo = 0; hi = 65535; }
+    const scale = 255 / (hi - lo);
+    rgba = new Uint8ClampedArray(n * 4);
+    for (let k = 0; k < n; k++) {
+      for (let c = 0; c < 3; c++) {
+        let v = (val(k, spp === 1 ? 0 : c) - lo) * scale;
+        if (intp === 0) v = 255 - v;
+        rgba[k * 4 + c] = v;
+      }
+      rgba[k * 4 + 3] = 255;
+    }
+  } else {
+    rgba = new Uint8ClampedArray(UTIF.toRGBA8(best).buffer);
+  }
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
+  return cv;
+}
+function loadImg(src) { return new Promise((ok, ng) => { const im = new Image(); im.onload = () => ok(im); im.onerror = () => ng(new Error('画像を表示できませんでした')); im.src = src; }); }
+// 画像ファイル → 保存用のデータ（必要なら縮小）
+async function fileToImage(file) {
+  let cv;
+  if (isTiff(file)) cv = await tiffToCanvas(file);
+  else {
+    const url = await new Promise((ok, ng) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = ng; fr.readAsDataURL(file); });
+    const im = await loadImg(url);
+    if (Math.max(im.naturalWidth, im.naturalHeight) <= IMG_MAX) return { src: url, w: im.naturalWidth, h: im.naturalHeight };
+    cv = document.createElement('canvas'); cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+    cv.getContext('2d').drawImage(im, 0, 0);
+  }
+  const r = Math.min(1, IMG_MAX / Math.max(cv.width, cv.height));
+  if (r < 1) {
+    const c2 = document.createElement('canvas');
+    c2.width = Math.round(cv.width * r); c2.height = Math.round(cv.height * r);
+    const g = c2.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(cv, 0, 0, c2.width, c2.height);
+    cv = c2;
+  }
+  return { src: canvasToUrl(cv, isTiff(file) || /png/i.test(file.type || '')), w: cv.width, h: cv.height };
+}
 // 画像を入れる（画像ブロック・泳動画像ブロック共通）
 function makeImageSetter(doc, after) {
-  return (i, file) => {
-    if (!/^image\//.test(file.type)) { alert('画像ファイル（PNG・JPEG など）を選んでください。'); return; }
-    const fr = new FileReader();
-    fr.onload = () => {
-      const b = doc.blocks[i];
-      if (!b) return;
-      b.src = fr.result;
-      if (b.type === 'gel') {
-        const im = new Image();
-        im.onload = () => { b.nw = im.naturalWidth; b.nh = im.naturalHeight; b.crop = { t: 0, b: 0, l: 0, r: 0 }; after(); };
-        im.src = fr.result;
-      } else after();
-    };
-    fr.readAsDataURL(file);
+  return async (i, file) => {
+    if (!isImageFile(file)) { alert('画像ファイル（TIFF・PNG・JPEG など）を選んでください。'); return; }
+    let r;
+    try { if (isTiff(file)) toast('TIFF を読み取り中…'); r = await fileToImage(file); }
+    catch (e) { alert('画像を読み取れませんでした: ' + e.message); return; }
+    const b = doc.blocks[i];
+    if (!b) return;
+    b.src = r.src;
+    if (b.type === 'gel') { b.nw = r.w; b.nh = r.h; b.crop = { t: 0, b: 0, l: 0, r: 0 }; }
+    after();
   };
 }
 // data-bind の入力を反映（図の編集パネル用。プロトコル編集・記録の入力で共通）

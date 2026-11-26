@@ -184,6 +184,9 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .sheet .g-unit { position: absolute; right: 0.6em; top: -1.5em; }
 .sheet .g-tick { position: absolute; right: 0; transform: translateY(-50%); padding-right: 0.7em; white-space: nowrap; }
 .sheet .g-tick::after { content: ""; position: absolute; right: 0; top: 50%; width: 0.45em; border-top: 0.6pt solid #000; }
+.sheet .gel-mix { margin: 0.5mm 0 1.5mm; }
+.sheet .gel-mix table.mat-t td.nm { min-width: 24mm; }
+.sheet .gel-mix table.mat-t td.amt { min-width: 12mm; }
 .sheet .gel-empty { border: 0.6pt dashed #888; color: #888; text-align: center; padding: 8mm 0; width: 60%; }
 /* 図の編集パネル（入力画面で図の下に出る。印刷されない） */
 .sheet .fig-ed { font-family: var(--ui); font-size: 13px; line-height: 1.5; background: #f4f8fc; border: 1px solid #c9d6e3; border-radius: 6px; padding: 6px 10px; margin: 0 0 4mm; }

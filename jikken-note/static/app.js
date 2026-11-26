@@ -75,7 +75,7 @@ function countBlanks(doc) {
   };
   const blocks = doc.blocks.filter(b => b.print !== false);
   walk(blocks); walk(doc.title);
-  for (const b of blocks) if (b.type === 'materials' && (b.n === '' || b.n == null)) c++;
+  for (const b of blocks) if ((b.type === 'materials' && (b.n === '' || b.n == null)) || (b.type === 'dilution' && (b.conc === '' || b.conc == null))) c++;
   return c;
 }
 
@@ -263,6 +263,71 @@ function renderMaterials(b, bp, ctx) {
   const hdr = c.vol ? '' : '<tr class="mh"><td></td><td></td><td></td><td>（×１量）</td><td></td></tr>';
   return `<div class="mat"><div class="mat-h"><span>${head}</span></div><table class="mat-t">${hdr}${rows}</table></div>`;
 }
+// ---------- 鋳型DNA・段階希釈 ----------
+const AMT_UNITS = { ug: 1000, ng: 1, pg: 1e-3, fg: 1e-6 };   // ng を 1 とした大きさ
+function fmtAmt(ng, suffix = '') {
+  // 1〜1000 に収まる単位を選ぶ（例 0.1ng → 100pg）
+  if (isNaN(ng)) return '';
+  if (ng === 0) return '0 ng' + suffix;
+  let u = 'fg';
+  for (const k of ['ug', 'ng', 'pg', 'fg']) { if (Math.abs(ng) / AMT_UNITS[k] >= 1 - 1e-9) { u = k; break; } }
+  const v = ng / AMT_UNITS[u];
+  return `${+v.toPrecision(3)} ${u}${suffix}`;
+}
+function dilCompute(b) {
+  const cu = AMT_UNITS[String(b.conc_unit || 'ng/uL').split('/')[0]] || 1;
+  const c0 = num(b.conc) * cu;                     // ng/uL
+  const v = num(b.per_rxn), make = num(b.make), fdef = num(b.factor);
+  const rows = [];
+  let c = c0, total = 1;
+  (b.rows || []).forEach((r, k) => {
+    const f = isNaN(num(r.f)) ? fdef : num(r.f);
+    total *= f;
+    c = c / f;
+    const take = make / f;
+    rows.push({ k, f, total, c, amt: c * v, take, dil: make - take, note: r.note || '' });
+  });
+  return { c0, v, make, rows };
+}
+function renderDilution(b, bp, ctx) {
+  const d = dilCompute(b);
+  const cell = (txt, w = '3em') => txt ? `<span class="vf calc">${esc(txt)}</span>` : `<span class="vf blank" style="min-width:${w}">&nbsp;</span>`;
+  const unit = esc(b.conc_unit || 'ng/uL');
+  const concIn = ctx.mode === 'fill'
+    ? `<input class="vin${b.conc === '' || b.conc == null ? ' empty' : ''}" data-num="1" data-path="${bp}.conc" data-key="${bp}.conc" value="${esc(b.conc ?? '')}" placeholder="濃度" style="width:4.5em">`
+    : (b.conc !== '' && b.conc != null ? `<span class="vf">${esc(b.conc)}</span>` : '<span class="vf blank" style="min-width:3em">&nbsp;</span>');
+  const nm = b.name ? `　${inlineFmt(b.name, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}` : '';
+  const head = `<div class="blk-h">【${inlineFmt(b.label || '鋳型DNA', { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}】<span class="extra">${nm}</span></div>
+    <div class="dil-info">原液の濃度：${concIn} ${unit}</div>
+    <div class="dil-info">1反応（1レーン）に ${cell(fmtNum(d.v), '2em')} uL 使用${isNaN(d.make) ? '' : `／各チューブ ${esc(fmtNum(d.make))} uL 作製`}</div>`;
+  const no = k => k < 0 ? '原液' : (b.marks === 'num' ? String(k + 1) : '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'[k] || String(k + 1));
+  const dil = esc(b.diluent || '1/10TE');
+  let rows = '';
+  if (b.show_stock !== false) rows += `<tr><td>${no(-1)}</td><td>—</td><td class="num">${cell(fmtAmt(d.c0, '/uL'))}</td><td class="num">${cell(fmtAmt(d.c0 * d.v))}</td><td></td><td></td><td></td></tr>`;
+  d.rows.forEach(r => {
+    rows += `<tr><td>${no(r.k)}</td><td>1/${esc(fmtNum(r.total))}</td><td class="num">${cell(fmtAmt(r.c, '/uL'))}</td><td class="num">${cell(fmtAmt(r.amt))}</td>
+      <td class="num">${isNaN(r.take) ? cell('') : `${no(r.k - 1)} ${esc(fmtNum(r.take))} uL`}</td><td class="num">${isNaN(r.dil) ? cell('') : `${esc(fmtNum(r.dil))} uL`}</td>
+      <td class="note">${inlineFmt(r.note, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}</td></tr>`;
+  });
+  const hasNote = d.rows.some(r => r.note);
+  const table = `<table class="grid dil-t${hasNote ? '' : ' no-note'}"><tr class="hr"><td>No.</td><td>希釈</td><td>濃度</td><td>鋳型量<br>(1反応)</td><td>前の液</td><td>${dil}</td><td>メモ</td></tr>${rows}</table>`;
+  return `<div class="dil">${head}${table}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（倍率・段数・作製量など）</summary>${dilEdHtml(b, bp)}</details>` : '');
+}
+function dilEdHtml(b, bp) {
+  return `<div class="row">見出し ${inp(bp + '.label', b.label, '鋳型DNA', '110px')} 名前 ${inp(bp + '.name', b.name, '例：pUC19', '140px')}
+    原液の濃度 ${inp(bp + '.conc', b.conc, '空欄＝毎回入力', '90px')}
+    <select data-bind="${bp}.conc_unit">${['ug/uL', 'ng/uL', 'pg/uL', 'fg/uL'].map(u => `<option ${(b.conc_unit || 'ng/uL') === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
+    1反応あたり ${inp(bp + '.per_rxn', b.per_rxn, '1', '50px')} uL</div>
+    <div class="row" style="margin-top:6px">希釈倍率 ${inp(bp + '.factor', b.factor, '10', '50px')} 倍ずつ
+    段数 <input type="number" min="0" max="20" data-bind="${bp}.steps" data-num="1" data-resize="1" value="${(b.rows || []).length}" style="width:60px">
+    各チューブの作製量 ${inp(bp + '.make', b.make, '100', '60px')} uL
+    希釈液 ${inp(bp + '.diluent', b.diluent, '1/10TE', '80px')}
+    番号 <select data-bind="${bp}.marks"><option value="circle" ${b.marks !== 'num' ? 'selected' : ''}>①②③</option><option value="num" ${b.marks === 'num' ? 'selected' : ''}>1 2 3</option></select>
+    <label><input type="checkbox" data-bind="${bp}.show_stock" ${b.show_stock !== false ? 'checked' : ''}> 原液の行を表示</label></div>
+    <table class="ed" style="margin-top:6px"><tr><th>段</th><th>この段だけ倍率を変える（空欄＝共通の倍率）</th><th>メモ（レーン番号など）</th></tr>
+    ${(b.rows || []).map((r, k) => `<tr><td>${k + 1}</td><td>${inp(`${bp}.rows.${k}.f`, r.f, b.factor || '10', '70px')}</td><td>${inp(`${bp}.rows.${k}.note`, r.note, '例：レーン2')}</td></tr>`).join('')}</table>
+    <div class="muted">表の「前の液」は、ひとつ前のチューブから取る量です（作製量 ÷ 倍率）。残りを希釈液で合わせます。</div>`;
+}
 function renderTable(b, bp, ctx) {
   let h = `<table class="grid${b.full ? ' full' : ''}">`;
   b.rows.forEach((row, r) => {
@@ -317,6 +382,8 @@ function renderDoc(doc, opts = {}) {
   let h = `<div class="sheet${mode === 'fill' ? ' fill' : ''}">`;
   if (opts.date) h += `<div class="date-line">${esc(jpDate(opts.date))}</div>`;
   h += `<h1 class="ptitle">●<u>${inlineFmt(doc.title || '', { ...ctx, path: 'title' })}</u></h1>`;
+  // 横並び（印刷プレビューでドラッグして作る）：beside のブロックは直前のブロックの右に並ぶ。入力画面では縦に並べる
+  const groups = [];
   (doc.blocks || []).forEach((b, i) => {
     const bp = `blocks.${i}`;
     const off = b.print === false;
@@ -330,14 +397,19 @@ function renderDoc(doc, opts = {}) {
       case 'materials': inner = renderMaterials(b, bp, ctx); break;
       case 'table': inner = renderTable(b, bp, ctx); break;
       case 'pcr': inner = renderPcr(b, bp, ctx); break;
-      case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${+b.width || 100}%">` : ''; break;
+      case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${(+b.width || 100) * 1.64}mm">` : ''; break;
       case 'tubes': inner = renderTubes(b, bp, ctx); break;
       case 'pagebreak': inner = '<div class="pbreak"><span>改ページ（印刷ではここで次のページへ）</span></div>'; break;
       case 'gel': inner = renderGel(b, bp, ctx); break;
+      case 'dilution': inner = renderDilution(b, bp, ctx); break;
     }
     const chk = mode === 'fill' ? `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" ${off ? '' : 'checked'}></label>` : '';
-    h += `<div class="block${off ? ' off' : ''}" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
+    const html = `<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
+    const prev = groups[groups.length - 1];
+    if (mode !== 'fill' && b.beside && prev && b.type !== 'pagebreak' && prev.type !== 'pagebreak') prev.items.push(html);
+    else groups.push({ type: b.type, items: [html] });
   });
+  for (const g of groups) h += g.items.length > 1 ? `<div class="block-row">${g.items.join('')}</div>` : g.items[0];
   if (opts.memo && doc.memo && doc.memo.text && doc.memo.text.trim()) {
     h += `<div class="memo"><div class="memo-h">【メモ】</div>${renderText(doc.memo.text, { ...ctx, mode: mode === 'fill' ? 'print' : mode, path: 'memo.text' })}</div>`;
   }
@@ -388,7 +460,7 @@ function openTaigen(text, onApply) {
 // ブロック編集画面（プロトコル編集・記録の「全体を編集」で共用）
 // ============================================================
 const BLOCK_TYPES = {
-  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像', tubes: 'チューブ配置図', gel: '泳動画像（レーン名）', pagebreak: '改ページ',
+  heading: '見出し', steps: '操作手順（↓自動）', text: '文章', materials: '試薬と量（自動計算）', table: '表', pcr: 'PCR条件', image: '画像', tubes: 'チューブ配置図', gel: '泳動画像（レーン名）', dilution: '鋳型DNA・段階希釈', pagebreak: '改ページ',
 };
 function newBlock(type) {
   switch (type) {
@@ -400,6 +472,7 @@ function newBlock(type) {
     case 'pcr': return { type, label: 'PCR', steps: [{ t: '98℃', d: '30sec' }, { t: '98℃', d: '10sec' }, { t: '[[アニール温度]]℃', d: '5sec' }, { t: '72℃', d: '[[伸長時間]]' }, { t: '4℃', d: '∞' }], cyc_from: 1, cyc_to: 3, cyc_text: '×[[サイクル数=30]]サイクル' };
     case 'image': return { type, src: '', width: 100 };
     case 'pagebreak': return { type };
+    case 'dilution': return { type, label: '鋳型DNA', name: '', conc: '', conc_unit: 'ng/uL', per_rxn: '1', factor: '10', make: '100', diluent: '1/10TE', marks: 'circle', show_stock: true, rows: Array.from({ length: 5 }, () => ({ f: '', note: '' })) };
     case 'tubes': return { type, label: '8連チューブ', count: 8, strip: true, legend: true, tubes: Array.from({ length: 8 }, (_, k) => ({ mark: String(k + 1), name: '', kind: 's', vol: '' })) };
     case 'gel': return { type, label: '電気泳動', note: '', mix_label: '泳動サンプル（1レーンあたり）', mix_show: true, mix: clone(DEFAULT_GEL_MIX), src: '', nw: 0, nh: 0, width: 80, crop: { t: 0, b: 0, l: 0, r: 0 }, bright: 100, contrast: 100, count: 8, unit: '(bp)', markers: [], lanes: Array.from({ length: 8 }, (_, k) => ({ mark: k === 0 ? 'M' : String(k), name: '', x: (k + 0.5) / 8 })) };
   }
@@ -524,6 +597,7 @@ function blockEditorHtml(b, i, n) {
     case 'tubes': body = tubesEdHtml(b, bp); break;
     case 'pagebreak': body = '<div class="muted">印刷するとき、ここで必ず次のページに送ります。それ以外の場所は、項目や画像の途中で切れないように自動で分けます。</div>'; break;
     case 'gel': body = gelEdHtml(b, bp); break;
+    case 'dilution': body = dilEdHtml(b, bp); break;
     case 'image':
       body = `<div class="imgdrop" data-imgdrop="${i}">${b.src ? `<img src="${b.src}" alt="">` : ''}<span>ここに画像をドラッグ＆ドロップ（TIFF・PNG・JPEG など）</span></div>
         <div class="row"><input type="file" accept="image/*,.tif,.tiff" data-act="img" data-i="${i}"> 幅 ${inp(bp + '.width', b.width, '100', '50px')} %
@@ -922,6 +996,12 @@ function resizeFig(b) {
     while (b.lanes.length < n) b.lanes.push({ mark: String(b.lanes.length), name: '', x: 0 });
     b.lanes.length = n;
     if (changed) b.lanes.forEach((l, k) => { l.x = (k + 0.5) / n; });
+  } else if (b.type === 'dilution') {
+    const n = Math.max(0, Math.min(20, parseInt(b.steps) || 0));
+    b.rows = b.rows || [];
+    while (b.rows.length < n) b.rows.push({ f: '', note: '' });
+    b.rows.length = n;
+    delete b.steps;
   }
 }
 function equalizeLanes(b) {
@@ -991,16 +1071,22 @@ function renderGel(b, bp, ctx) {
     return head + ph + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
   }
   const mks = (b.markers || []).filter(m => m.label);
-  const mkW = mks.length ? Math.max(2.2, ...mks.map(m => textWidthEm(m.label) + 0.8), textWidthEm(b.unit || '') + 0.4) : 0;
+  // 目盛りの列（9pt）：ラベル＋目盛り線が入る幅。単位は同じ列の上（または下）に置き、列は単位の幅にも合わせて広がる
+  const mkW = mks.length ? Math.max(2.2, ...mks.map(m => textWidthEm(m.label) * 1.1 + 1)) : 0;
+  const unitPos = b.unit_pos === 'bottom' ? 'bottom' : 'top';
   const maxW = Math.max(0, ...b.lanes.map(l => textWidthEm(l.name)));
   const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.6) : 0;
   const sub = { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode };
   const names = maxW ? rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, nameH) : '';
   const marks = `<div class="g-marks">${b.lanes.map(l => `<div style="left:${l.x * 100}%">${inlineFmt(l.mark, sub)}</div>`).join('')}</div>`;
-  const mkCol = mks.length ? `<div class="g-mk" style="width:${mkW}em">${b.unit ? `<div class="g-unit">${esc(b.unit)}</div>` : ''}${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '';
-  const html = `<div class="gel" style="width:${b.width || 80}%">${head}
-    <div class="g-wrap"><div class="g-left" style="width:${mkW}em"></div><div class="g-main">${names}${marks}</div></div>
-    <div class="g-wrap">${mkCol}<div class="g-main">${gelImgBox(b)}</div></div></div>`;
+  const unit = mks.length && b.unit ? `<div class="g-unit">${esc(b.unit)}</div>` : '';
+  const mkCol = mks.length ? `<div class="g-mk" style="min-width:${mkW}em">${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '<div></div>';
+  const html = `<div class="gel" style="width:${(b.width || 80) * 1.64}mm">${head}
+    <div class="g-grid">
+      <div class="g-uc">${unitPos === 'top' ? unit : ''}</div><div class="g-main">${names}${marks}</div>
+      ${mkCol}<div class="g-main">${gelImgBox(b)}</div>
+      ${unitPos === 'bottom' && unit ? `<div class="g-uc bottom">${unit}</div><div></div>` : ''}
+    </div></div>`;
   return html + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
 }
 
@@ -1049,7 +1135,7 @@ function gelEdHtml(b, bp) {
       <button type="button" class="small primary" data-fig="from-tubes" data-path="${bp}">チューブ図から名前を引き継ぐ</button></div>
     <table class="ed"><tr><th>レーン</th><th>上の記号（M, 1, 2…）</th><th>サンプル名（斜めに表示）</th></tr>
     ${b.lanes.map((l, k) => `<tr><td>${k + 1}</td><td>${inp(`${bp}.lanes.${k}.mark`, l.mark, '', '70px')}</td><td>${inp(`${bp}.lanes.${k}.name`, l.name, '例：1kb ladder')}</td></tr>`).join('')}</table>
-    <div class="row" style="margin-top:6px"><b>マーカーの目盛り（左側）</b> 単位 ${inp(bp + '.unit', b.unit, '(bp)', '60px')}
+    <div class="row" style="margin-top:6px"><b>マーカーの目盛り（左側）</b> 単位 ${inp(bp + '.unit', b.unit, '(bp)', '60px')} を目盛りの <select data-bind="${bp}.unit_pos" data-rerender="1"><option value="top" ${b.unit_pos !== 'bottom' ? 'selected' : ''}>上</option><option value="bottom" ${b.unit_pos === 'bottom' ? 'selected' : ''}>下</option></select> に表示
       <button type="button" class="small" data-fig="mk-add" data-path="${bp}">＋ 目盛りを追加</button></div>
     <table class="ed">${(b.markers || []).map((m, k) => `<tr><td>${inp(`${bp}.markers.${k}.label`, m.label, '例：1k', '80px')}</td><td>上から ${inp(`${bp}.markers.${k}.y`, m.y, '', '50px')} %</td>
       <td><button type="button" class="small" data-fig="mk-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>`;
@@ -1954,15 +2040,153 @@ async function viewRecords() {
   load();
 }
 
+// ============================================================
+// 印刷プレビューでブロックをドラッグして動かす（横に並べる・順番を変える）
+//   横に並べるのは、中身の幅の合計が印刷幅（164mm）に収まるときだけ
+// ============================================================
+const ROW_W = 164, ROW_GAP = 4, PX_MM = 96 / 25.4;   // mm（CSS では 1mm = 96/25.4 px）
+function visibleRows(B) {
+  const rows = [];
+  B.forEach((b, i) => {
+    if (b.print === false) return;
+    const last = rows[rows.length - 1];
+    if (b.beside && last && b.type !== 'pagebreak' && B[last[0]].type !== 'pagebreak') last.push(i); else rows.push([i]);
+  });
+  return rows;
+}
+function moveBlock(B, from, to, zone) {
+  const X = B[from];
+  // 動かすブロックが横並びの先頭なら、次のブロックを新しい先頭にする
+  if (!X.beside) { for (let k = from + 1; k < B.length; k++) { if (B[k].print === false) continue; if (B[k].beside) B[k].beside = false; break; } }
+  B.splice(from, 1);
+  const t = to > from ? to - 1 : to;
+  const row = visibleRows(B).find(r => r.includes(t)) || [t];
+  if (zone === 'right') { X.beside = true; B.splice(t + 1, 0, X); }
+  else if (zone === 'left') { X.beside = !!B[t].beside; B[t].beside = true; B.splice(t, 0, X); }
+  else if (zone === 'top') { X.beside = false; B.splice(row[0], 0, X); }
+  else { X.beside = false; B.splice(row[row.length - 1] + 1, 0, X); }
+  if (!X.beside) delete X.beside;
+}
+// 各ブロックの中身の幅（mm）を測る
+async function measureNatural(doc, opts) {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:absolute;left:-10000px;top:0;visibility:hidden';
+  box.innerHTML = renderDoc(doc, opts).replace('<div class="sheet', `<div style="width:${ROW_W}mm;padding:0;box-shadow:none;min-height:0" class="sheet natmeasure`);
+  document.body.appendChild(box);
+  await waitAssets(box);
+  const w = {};
+  box.querySelectorAll('[data-bi]').forEach(el => { w[el.dataset.bi] = el.offsetWidth / PX_MM; });
+  box.remove();
+  return w;
+}
+function bindPreviewDrag(pagesEl, getDoc, onMove) {
+  let nat = {}, drag = null;
+  const tip = document.createElement('div');
+  tip.className = 'drag-tip no-print';
+  const clear = () => pagesEl.querySelectorAll('.drop-top,.drop-bottom,.drop-left,.drop-right,.drop-bad').forEach(e => e.classList.remove('drop-top', 'drop-bottom', 'drop-left', 'drop-right', 'drop-bad'));
+  const zoneAt = (x, y) => {
+    const hit = document.elementFromPoint(x, y);
+    const el = hit && hit.closest('.page [data-bi]');
+    if (!el) return null;
+    const ti = +el.dataset.bi;
+    if (ti === drag.i) return null;
+    const B = getDoc().blocks;
+    const r = el.getBoundingClientRect();
+    const fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;
+    const contentFrac = Math.min(1, (nat[ti] || ROW_W) / (el.offsetWidth / PX_MM || ROW_W));
+    let zone;
+    if (fx > Math.min(contentFrac + 0.02, 0.85)) zone = 'right';
+    else if (fx < 0.08) zone = 'left';
+    else zone = fy < 0.5 ? 'top' : 'bottom';
+    let ok = true, why = '';
+    if (zone === 'left' || zone === 'right') {
+      if (B[ti].type === 'pagebreak' || B[drag.i].type === 'pagebreak') { ok = false; why = '改ページは横に並べられません'; }
+      else {
+        const row = (visibleRows(B).find(rr => rr.includes(ti)) || [ti]).filter(k => k !== drag.i);
+        const need = row.reduce((a, k) => a + (nat[k] || ROW_W), 0) + (nat[drag.i] || ROW_W) + ROW_GAP * row.length;
+        if (need > ROW_W + 0.5) { ok = false; why = `横に入りません（あと ${Math.ceil(need - ROW_W)}mm 足りない）`; }
+      }
+    }
+    return { el, ti, zone, ok, why };
+  };
+  const sameBlock = i => pagesEl.querySelectorAll(`.page [data-bi="${i}"]`);
+  pagesEl.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const el = e.target.closest('.page [data-bi]');
+    if (!el) return;
+    e.preventDefault();
+    drag = { i: +el.dataset.bi, x: e.clientX, y: e.clientY, on: false };
+  });
+  const onMoveEv = e => {
+    if (!drag) return;
+    if (!drag.on) {
+      if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) < 6) return;
+      drag.on = true; sameBlock(drag.i).forEach(x => x.classList.add('dragging')); document.body.appendChild(tip);
+    }
+    clear();
+    const z = zoneAt(e.clientX, e.clientY);
+    drag.z = z;
+    const zf = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+    tip.style.left = (e.clientX + 14) / zf + 'px'; tip.style.top = (e.clientY + 14) / zf + 'px';
+    if (!z) { tip.className = 'drag-tip no-print'; tip.textContent = '動かしたい場所まで持っていく'; }
+    else if (!z.ok) { z.el.classList.add('drop-bad'); tip.className = 'drag-tip bad no-print'; tip.textContent = z.why; }
+    else {
+      sameBlock(z.ti).forEach(x => x.classList.add('drop-' + z.zone));
+      tip.className = 'drag-tip no-print';
+      tip.textContent = { top: 'この上へ移動', bottom: 'この下へ移動', left: '左に並べる', right: '右に並べる' }[z.zone];
+    }
+    if (e.clientY < 70) window.scrollBy(0, -18); else if (e.clientY > window.innerHeight - 50) window.scrollBy(0, 18);
+  };
+  const onUpEv = () => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    clear(); tip.remove(); pagesEl.querySelectorAll('.dragging').forEach(x => x.classList.remove('dragging'));
+    if (d.on && d.z && d.z.ok) onMove(d.i, d.z.ti, d.z.zone);
+  };
+  // 画面を開き直しても、前の画面の分が残らないように付け替える
+  if (bindPreviewDrag.prev) { document.removeEventListener('mousemove', bindPreviewDrag.prev[0]); document.removeEventListener('mouseup', bindPreviewDrag.prev[1]); }
+  bindPreviewDrag.prev = [onMoveEv, onUpEv];
+  document.addEventListener('mousemove', onMoveEv);
+  document.addEventListener('mouseup', onUpEv);
+  return { setNatural: w => { nat = w; } };
+}
+
 async function viewPrint(id) {
   $app.onclick = null;
   const r = await api.get('records/' + id);
   const rec = r.data;
   $app.innerHTML = `<div class="toolbar no-print"><div class="row"><h2 style="margin:0">印刷プレビュー</h2><span class="muted">${esc(rec.protocol_name)}　記録 No.${id}</span><span class="spacer"></span>
+      <button id="undo" disabled>元に戻す</button> <button id="unrow">横並びをすべて解除</button>
       <a class="btn" href="#/record/${id}">← 入力に戻る</a> <button class="primary big" id="pr">印刷する</button></div>
-      <div class="muted" style="margin-top:6px">下の表示が、そのまま印刷されるページです。印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。切りたい場所を変えたいときは、プロトコルや記録に「改ページ」ブロックを入れてください。</div></div>
-    <div class="pages" id="pages"><div class="muted">ページを組み立て中…</div></div>`;
-  document.getElementById('pages').innerHTML = await paginateHtml(rec.doc, { mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false, cut: !!rec.opts.cut });
+      <div class="muted" style="margin-top:6px">ブロックをドラッグすると動かせます：ほかのブロックの<b>右側の空き</b>に落とすと横に並び（幅が入るときだけ）、<b>上半分・下半分</b>に落とすとその上・下へ移ります。並べ方はこの記録に保存されます（プロトコルは変わりません）。<br>
+      印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。切りたい場所を変えたいときは「改ページ」ブロックを入れてください。</div></div>
+    <div class="pages dragmode" id="pages"><div class="muted">ページを組み立て中…</div></div>`;
+  const pagesEl = document.getElementById('pages');
+  const opts = () => ({ mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false, cut: !!rec.opts.cut });
+  const undo = [];
+  const undoBtn = document.getElementById('undo');
+  const dnd = bindPreviewDrag(pagesEl, () => rec.doc, async (from, to, zone) => {
+    undo.push(clone(rec.doc.blocks));
+    moveBlock(rec.doc.blocks, from, to, zone);
+    await saveAndDraw();
+  });
+  const draw = async () => {
+    const y = window.scrollY;
+    pagesEl.innerHTML = await paginateHtml(rec.doc, opts());
+    dnd.setNatural(await measureNatural(rec.doc, opts()));
+    window.scrollTo(0, y);
+    undoBtn.disabled = !undo.length;
+    document.getElementById('unrow').disabled = !rec.doc.blocks.some(b => b.beside);
+  };
+  const saveAndDraw = async () => {
+    const u = await putWithCheck('records/' + id, rec, r.updated);
+    if (!u) { await viewPrint(id); return; }
+    r.updated = u;
+    await draw();
+  };
+  undoBtn.onclick = async () => { if (!undo.length) return; rec.doc.blocks = undo.pop(); await saveAndDraw(); toast('元に戻しました'); };
+  document.getElementById('unrow').onclick = async () => { undo.push(clone(rec.doc.blocks)); rec.doc.blocks.forEach(b => delete b.beside); await saveAndDraw(); toast('横並びを解除しました'); };
+  await draw();
   document.getElementById('pr').onclick = () => window.print();
   pollFn = sameView(async () => { const r2 = await quietGet('records/' + id); if (r2.updated !== r.updated) await rerenderKeepScroll(() => viewPrint(id)); });
   window.onafterprint = async () => { if (location.hash === '#/print/' + id) { await api.send('POST', `records/${id}/printed`); toast('印刷日時を記録しました'); } };

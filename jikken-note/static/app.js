@@ -737,6 +737,7 @@ function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {})
   const render = () => {
     el.innerHTML = `
       ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}
+        よみがな ${inp('kana', doc.kana, '例：せいげんこうそしょり（50音順の並べ替え・検索用）', '200px')}
         フォルダ <select data-bind="folder">${FOLDERS.map(f => `<option ${doc.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(doc.folder) ? '' : '<option value="" selected>未分類</option>'}</select></div></div>` : ''}
       <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div>
         ${withMeta ? `<div class="row" style="margin-top:8px">タグ <span id="pe-tags">${tagBoxHtml(doc.tags || [])}</span></div>
@@ -1243,17 +1244,26 @@ function equalizeLanes(b) {
   const a = b.lanes[0].x, z = b.lanes[n - 1].x;
   b.lanes.forEach((l, k) => { l.x = a + (z - a) * k / (n - 1); });
 }
-function rotatedNames(items, ctx, heightEm) {
-  // items: [{left:'css位置', html}]  斜め45°の名前
-  return `<div class="rot-names" style="height:${heightEm}em">${items.map(it => `<div class="rot" style="left:${it.left}"><span>${it.html}</span></div>`).join('')}</div>`;
+// サンプル名の向き：setting = 'auto'（文字数と間隔から選ぶ）/ '0'（横）/ '45' / '60'（斜め）/ '90'（縦）
+//   maxW：いちばん長い名前（全角=1）、spacingMm：レーン（チューブ）の間隔、fontMm：文字の大きさ
+function nameAngle(setting, maxW, spacingMm, fontMm) {
+  if (['0', '45', '60', '90'].includes(String(setting))) return +setting;
+  if (maxW * fontMm <= spacingMm * 0.92) return 0;   // 横に書いても隣と重ならない
+  return maxW <= 7 ? 45 : 90;                        // 長い名前は縦書きにして右へのはみ出しを防ぐ
+}
+function rotatedNames(items, ctx, maxW, angle = 45) {
+  // items: [{left:'css位置', html}]
+  const a = +angle;
+  const h = a === 0 ? 1.35 : a === 90 ? Math.min(16, maxW * 1.0 + 0.5) : Math.min(14, maxW * Math.sin(a * Math.PI / 180) + 0.6);
+  return `<div class="rot-names a${a}" style="height:${h.toFixed(2)}em">${items.map(it => `<div class="rot" style="left:${it.left}"><span style="${a !== 0 && a !== 90 ? `transform:rotate(-${a}deg)` : ''}">${it.html}</span></div>`).join('')}</div>`;
 }
 function renderTubes(b, bp, ctx) {
   const n = b.tubes.length;
   const cw = Math.min(15, 164 / n);   // 1本の幅(mm)
   const maxW = Math.max(0, ...b.tubes.map(t => textWidthEm(t.name)));
-  const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.9) : 0;
   const uid = 'tb' + Math.random().toString(36).slice(2, 8);
-  const names = maxW ? rotatedNames(b.tubes.map((t, k) => ({ left: `${cw * (k + 0.5)}mm`, html: inlineFmt(t.name, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode }) })), ctx, nameH) : '';
+  const ang = nameAngle(b.name_rot || 'auto', maxW, cw, 3.53);
+  const names = maxW ? rotatedNames(b.tubes.map((t, k) => ({ left: `${cw * (k + 0.5)}mm`, html: inlineFmt(t.name, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode }) })), ctx, maxW, ang) : '';
   const fs = Math.min(11, cw * 0.95);   // 印の文字サイズ(pt)
   const tubes = b.tubes.map((t, k) => {
     const kind = TUBE_KINDS[t.kind] ? t.kind : 's';
@@ -1351,13 +1361,17 @@ function renderGel(b, bp, ctx) {
   const mkW = mks.length ? Math.max(2.2, ...mks.map(m => textWidthEm(m.label) * 1.1 + 1)) : 0;
   const unitPos = b.unit_pos === 'bottom' ? 'bottom' : 'top';
   const maxW = Math.max(0, ...b.lanes.map(l => textWidthEm(l.name)));
-  const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.6) : 0;
   const sub = { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode };
+  // サンプル名の向き（自動のときは、レーンの間隔に横書きで入るかで決める）
+  const gap = b.lanes.length > 1 ? Math.min(...b.lanes.slice(1).map((l, k) => Math.abs(l.x - b.lanes[k].x))) : 1;
+  const ang = nameAngle(b.name_rot || 'auto', maxW, gap * (b.width || 80) * 1.64 * 0.88, 3.53 * pc(b.name_fs));
   const cap = t => t ? `<div class="g-uc cap">${inlineFmt(t, sub)}</div>` : '<div></div>';
-  const names = maxW ? `<div style="font-size:${pc(b.name_fs)}em">${rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, nameH)}</div>` : '';
+  const names = maxW ? `<div style="font-size:${pc(b.name_fs)}em">${rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, maxW, ang)}</div>` : '';
   const marks = `<div class="g-marks" style="font-size:${pc(b.lane_fs)}em">${b.lanes.map(l => `<div style="left:${l.x * 100}%">${inlineFmt(l.mark, sub)}</div>`).join('')}</div>`;
   const unit = mks.length && b.unit ? `<div class="g-unit">${esc(b.unit)}</div>` : '';
-  const mkCol = mks.length ? `<div class="g-mk" style="min-width:${mkW}em;font-size:${(0.857 * pc(b.mk_fs)).toFixed(3)}em">${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '<div></div>';
+  // 単位（bp）を上に置くときは、文字の上端を画像の上端にそろえて目盛りの列の一番上に書く
+  const unitTop = unitPos === 'top' && unit ? `<div class="g-unit-top">${unit}</div>` : '';
+  const mkCol = mks.length ? `<div class="g-mkcol">${unitTop}<div class="g-mk" style="min-width:${mkW}em;font-size:${(0.857 * pc(b.mk_fs)).toFixed(3)}em">${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div></div>` : '<div></div>';
   // 上のラベル（複数レーンをまとめて横線＋文字）。段ごとに1行、段1がレーン名のすぐ上
   const xs = b.lanes.map(l => l.x), n = xs.length;
   const edge = (k, side) => {   // k: 0始まりのレーン、side: -1 左端 / +1 右端
@@ -1379,7 +1393,7 @@ function renderGel(b, bp, ctx) {
     <div class="g-grid">
       ${grpRows}
       ${names ? `${cap(b.cap_names)}<div class="g-main">${names}</div>` : ''}
-      <div class="g-uc">${unitPos === 'top' ? unit : (b.cap_marks ? inlineFmt(b.cap_marks, sub) : '')}</div><div class="g-main">${marks}</div>
+      ${cap(b.cap_marks)}<div class="g-main">${marks}</div>
       ${mkCol}<div class="g-main">${gelImgBox(b)}</div>
       ${unitPos === 'bottom' && unit ? `<div class="g-uc bottom">${unit}</div><div></div>` : ''}
     </div></div>`;
@@ -1387,11 +1401,15 @@ function renderGel(b, bp, ctx) {
 }
 
 // ---------- 図の編集パネル（プロトコル編集・記録の入力の両方で使う） ----------
+function nameRotSel(bp, b) {
+  return `<select data-bind="${bp}.name_rot" data-rerender="1">${[['auto', '自動（文字数で選ぶ）'], ['0', '横'], ['45', '斜め 45°'], ['60', '斜め 60°'], ['90', '縦']].map(([v, l]) => `<option value="${v}" ${(b.name_rot || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+}
 function tubesEdHtml(b, bp) {
   return `<div class="row">見出し ${inp(bp + '.label', b.label, '8連チューブ', '160px')}
     本数 <input type="number" min="1" max="24" data-bind="${bp}.count" data-num="1" data-resize="1" value="${b.tubes.length}" style="width:60px">
     <label><input type="checkbox" data-bind="${bp}.strip" ${b.strip ? 'checked' : ''}> 連結（8連など）</label>
     <label><input type="checkbox" data-bind="${bp}.legend" ${b.legend ? 'checked' : ''}> 凡例を表示</label>
+    サンプル名の向き ${nameRotSel(bp, b)}
     <button type="button" class="small" data-fig="marks-num" data-path="${bp}">印を番号に戻す</button></div>
     <table class="ed"><tr><th>No.</th><th>チューブの印</th><th>サンプル名（上に斜めに表示）</th><th>種類</th><th>液量など</th></tr>
     ${b.tubes.map((t, k) => `<tr><td>${k + 1}</td><td>${inp(`${bp}.tubes.${k}.mark`, t.mark, '', '70px')}</td><td>${inp(`${bp}.tubes.${k}.name`, t.name, '例：His12-Orc2')}</td>
@@ -1452,6 +1470,7 @@ function gelEdHtml(b, bp) {
       レーンの記号 ${inp(bp + '.lane_fs', b.lane_fs, '100', '50px')}
       サンプル名 ${inp(bp + '.name_fs', b.name_fs, '100', '50px')}
       上のラベル ${inp(bp + '.grp_fs', b.grp_fs, '100', '50px')}
+      サンプル名の向き ${nameRotSel(bp, b)}
       <span class="muted">目盛りの数字が重なるときは 70〜80 くらいに</span></div>
     <div class="row" style="margin-top:8px"><b>上のラベル（複数レーンをまとめて横線＋文字）</b>
       <button type="button" class="small" data-fig="grp-add" data-path="${bp}">＋ ラベルを追加</button>
@@ -1466,7 +1485,7 @@ function gelEdHtml(b, bp) {
       サンプル名の行 ${inp(bp + '.cap_names', b.cap_names, '例：サンプル', '100px')}
       レーン記号の行 ${inp(bp + '.cap_marks', b.cap_marks, '例：Lane', '80px')}
       ${[...new Set((b.groups || []).map(g => +g.level || 1))].sort().map(lv => `上のラベル段${lv} ${inp(`${bp}.grp_caps.${lv}`, (b.grp_caps || {})[lv], '例：濃度(uL)', '100px')}`).join(' ')}</div>
-    <div class="muted">「レーン記号の行」の見出しは、単位（bp など）を目盛りの「下」にしたときに表示されます。</div>`;
+`;
 }
 // 図のボタン操作。true を返したら描き直す
 function figAction(doc, t) {
@@ -2144,28 +2163,60 @@ function protocolOptions(ps) {
 }
 function loadFolderOpen() { try { return JSON.parse(localStorage.getItem('jn_folders_closed') || '[]'); } catch (e) { return []; } }
 function saveFolderOpen(closed) { try { localStorage.setItem('jn_folders_closed', JSON.stringify(closed)); } catch (e) { /* 保存できなくても使える */ } }
+// プロトコルの並べ替え（PCごとに覚える）
+const PSORTS = {
+  manual: ['自分で決めた順（↑↓で並べ替え）', null],
+  name: ['名前（50音順。よみがながあればそれで）', (a, b) => JA_COLL.compare(a.kana || a.name, b.kana || b.name)],
+  created_new: ['作成日（新しい順）', (a, b) => (b.created || '').localeCompare(a.created || '')],
+  created_old: ['作成日（古い順）', (a, b) => (a.created || '').localeCompare(b.created || '')],
+  updated: ['更新日（新しい順）', (a, b) => (b.updated || '').localeCompare(a.updated || '')],
+  last_used: ['最近使った順（記録の実験日）', (a, b) => (b.last_used || '').localeCompare(a.last_used || '') || JA_COLL.compare(a.name, b.name)],
+  uses: ['よく使う順（記録の数）', (a, b) => (b.uses || 0) - (a.uses || 0) || JA_COLL.compare(a.name, b.name)],
+};
+const JA_COLL = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+let protoQuery = '';
+function loadPSort() { try { const v = localStorage.getItem('jn_psort'); return PSORTS[v] ? v : 'manual'; } catch (e) { return 'manual'; } }
+function savePSort(v) { try { localStorage.setItem('jn_psort', v); } catch (e) { /* 覚えられなくても使える */ } }
+const normQ = t => String(t || '').normalize('NFKC').toLowerCase().replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
 async function viewProtocols() {
-  const ps = await api.get('protocols');
+  const all = await api.get('protocols');
+  const sortKey = loadPSort();
+  const q = normQ(protoQuery.trim());
+  let ps = q ? all.filter(p => q.split(/\s+/).every(w => normQ(p.name).includes(w) || normQ(p.kana).includes(w) || normQ(p.folder).includes(w))) : all.slice();
+  if (PSORTS[sortKey][1]) ps.sort(PSORTS[sortKey][1]);
+  const manual = sortKey === 'manual' && !q;
   const closed = loadFolderOpen();
   const sel = p => `<select class="small-sel" data-folder="${p.id}" title="フォルダを移す">${FOLDERS.map(f => `<option ${p.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(p.folder) ? '' : '<option value="" selected>未分類</option>'}</select>`;
   const section = g => `<details class="card folder" data-name="${esc(g.name)}" ${closed.includes(g.name) ? '' : 'open'}>
       <summary><span class="ftitle">📁 ${esc(g.name || '未分類')}</span><span class="muted">${g.items.length} 件</span><span class="spacer"></span>
         ${g.name ? `<button class="small" data-newin="${esc(g.name)}">＋ ここに新しいプロトコル</button>` : ''}</summary>
-      ${g.items.length ? `<table class="list"><tr><th style="width:80px">順番</th><th>名前</th><th style="width:120px">フォルダ</th><th>更新</th><th></th></tr>
-      ${g.items.map((p, i) => `<tr><td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === g.items.length - 1 ? 'disabled' : ''}>↓</button></td>
-        <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td>${sel(p)}</td><td class="muted nowrap">${esc(p.updated.slice(0, 16))}</td>
+      ${g.items.length ? `<table class="list"><tr>${manual ? '<th style="width:80px">順番</th>' : ''}<th>名前</th><th style="width:120px">フォルダ</th><th>作成</th><th>更新</th><th>使用</th><th></th></tr>
+      ${g.items.map((p, i) => `<tr>${manual ? `<td><button class="small" data-mv="-1" data-id="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button class="small" data-mv="1" data-id="${p.id}" ${i === g.items.length - 1 ? 'disabled' : ''}>↓</button></td>` : ''}
+        <td><a href="#/protocol/${p.id}">${esc(p.name)}</a></td><td>${sel(p)}</td><td class="muted nowrap">${esc((p.created || '').slice(0, 10))}</td><td class="muted nowrap">${esc(p.updated.slice(0, 16))}</td>
+        <td class="muted nowrap">${p.uses ? `${p.uses}回・最後 ${esc(p.last_used)}` : '未使用'}</td>
         <td style="white-space:nowrap"><a class="btn small" href="#/new/${p.id}">記録を書く</a> <a class="btn small" href="#/protocol/${p.id}">編集</a>
         <button class="small" data-dup="${p.id}">複製</button> <button class="small danger" data-del="${p.id}" data-name="${esc(p.name)}">削除</button></td></tr>`).join('')}</table>`
       : '<p class="muted" style="margin:8px 0 0">まだありません。「＋ ここに新しいプロトコル」で作るか、ほかのフォルダの行の「フォルダ」欄で移してください。</p>'}</details>`;
-  const groups = folderGroups(ps);
+  const groups = folderGroups(ps).filter(g => !q || g.items.length);
   $app.innerHTML = `<div class="row"><h2>プロトコルの管理</h2><span class="spacer"></span><button class="primary" id="newp">＋ 新しいプロトコル</button></div>
     ${importCardHtml()}
+    <div class="row psort"><input type="text" id="pq" value="${esc(protoQuery)}" placeholder="名前で検索（スペースで区切ると全部を含むもの）" style="flex:1;min-width:240px">
+      並び順 <select id="psort">${Object.entries(PSORTS).map(([k, [l]]) => `<option value="${k}" ${k === sortKey ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      ${q ? `<span class="muted">${ps.length} 件</span>` : ''}</div>
+    ${!manual ? '<p class="muted" style="margin:-6px 0 10px">↑↓で順番を変えるときは、並び順を「自分で決めた順」にして、検索を空にしてください。</p>' : ''}
+    ${q && !ps.length ? '<div class="card"><p class="muted">見つかりませんでした。</p></div>' : ''}
     ${groups.some(g => !g.name) ? '<p class="muted">「未分類」のプロトコルは、行の「フォルダ」欄で 培地・試薬・実験操作 のどれかに移せます。</p>' : ''}
     ${groups.map(section).join('')}`;
   document.getElementById('newp').onclick = () => { pendingFolder = ''; go('#/protocol/new'); };
+  document.getElementById('psort').onchange = e => { savePSort(e.target.value); viewProtocols(); };
+  let qt;
+  document.getElementById('pq').oninput = e => {
+    protoQuery = e.target.value; clearTimeout(qt);
+    qt = setTimeout(async () => { const pos = e.target.selectionStart; await viewProtocols(); const el = document.getElementById('pq'); el.focus(); el.setSelectionRange(pos, pos); }, 250);
+  };
   bindImportCard();
-  const sig = JSON.stringify(ps);
-  pollFn = sameView(async () => { if (JSON.stringify(await quietGet('protocols')) !== sig) await rerenderKeepScroll(viewProtocols); });
+  const sig = JSON.stringify(all);
+  pollFn = sameView(async () => { if (document.activeElement && document.activeElement.id === 'pq') return; if (JSON.stringify(await quietGet('protocols')) !== sig) await rerenderKeepScroll(viewProtocols); });
   $app.querySelectorAll('details.folder').forEach(d => d.ontoggle = () => {
     const c = loadFolderOpen().filter(n => n !== d.dataset.name);
     if (!d.open) c.push(d.dataset.name);

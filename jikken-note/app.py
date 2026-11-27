@@ -235,7 +235,7 @@ def windows_ocr(png_bytes):
 def row_protocol(r, full=True):
     data = json.loads(r["data"])
     d = {"id": r["id"], "name": r["name"], "sort": r["sort"], "updated": r["updated"],
-         "folder": data.get("folder") or ""}
+         "folder": data.get("folder") or "", "kana": data.get("kana") or ""}
     if full:
         d["data"] = data
     return d
@@ -378,7 +378,16 @@ class Handler(BaseHTTPRequestHandler):
             if p[1] == "protocols":
                 if len(p) == 2:
                     rows = con.execute("SELECT * FROM protocols ORDER BY sort, id").fetchall()
-                    return self.send_json([row_protocol(r, False) for r in rows])
+                    # 並べ替え用：作成日・記録の数・最後に使った日
+                    use = {u["protocol_id"]: u for u in con.execute(
+                        "SELECT protocol_id, COUNT(*) AS n, MAX(exp_date) AS last FROM records GROUP BY protocol_id").fetchall()}
+                    out = []
+                    for r in rows:
+                        d = row_protocol(r, False)
+                        u = use.get(r["id"])
+                        d.update({"created": r["created"], "uses": u["n"] if u else 0, "last_used": (u["last"] if u else "") or ""})
+                        out.append(d)
+                    return self.send_json(out)
                 r = con.execute("SELECT * FROM protocols WHERE id=?", (int(p[2]),)).fetchone()
                 return self.send_json(row_protocol(r)) if r else self.send_json({"error": "not found"}, 404)
             if p[1] == "records":

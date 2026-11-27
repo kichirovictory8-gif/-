@@ -255,9 +255,17 @@ function renderMaterials(b, bp, ctx) {
     const unitRef = r.unit + (c.vol ? c.vi.per : '');
     if (kind === 'calc') { a = amt(num(r.per1), r.unit); ref = isNaN(num(r.per1)) ? '' : fmtNum(num(r.per1)) + unitRef; }
     else if (kind === 'rest') { a = amt(c.restPer1, r.unit); ref = isNaN(c.restPer1) ? '残り' : fmtNum(c.restPer1) + unitRef; }
-    else if (kind === 'vol') { a = isNaN(c.n) ? `<span class="vf blank" style="min-width:3em">&nbsp;</span>${esc(r.unit)}` : `<span class="vf calc">${fmtNum(c.n)}</span>${esc(r.unit)}`; }
+    else if (kind === 'vol' || kind === 'ratio') {
+      // 作製量と同じ量（vol）、または作製量 × 割合（ratio）。単位が uL・mL・L なら作製量の単位から換算する
+      const k = kind === 'ratio' ? num(r.per1) : 1;
+      const mu = c.vol ? c.vi.mu : null;
+      const conv = mu && VOL_UNITS[r.unit] ? VOL_UNITS[mu] / VOL_UNITS[r.unit] : 1;
+      const v = c.n * k * conv;
+      a = isNaN(v) ? `<span class="vf blank" style="min-width:3em">&nbsp;</span>${esc(r.unit)}` : `<span class="vf calc">${fmtNum(v)}</span>${esc(r.unit)}`;
+      if (kind === 'ratio' && !r.ref && !isNaN(k)) ref = `作製量×${fmtNum(k)}`;
+    }
     else { a = inlineFmt(r.value || '', { ...ctx, path: `${rp}.value` }) + esc(r.unit || ''); }
-    const refHtml = (kind === 'text' || kind === 'vol') ? (r.ref ? inlineFmt(r.ref, { ...ctx, path: `${rp}.ref` }) : '') : (ref ? `（${esc(ref)}）` : '');
+    const refHtml = (kind === 'text' || kind === 'vol' || kind === 'ratio') ? (r.ref ? inlineFmt(r.ref, { ...ctx, path: `${rp}.ref` }) : (ref ? `（${esc(ref)}）` : '')) : (ref ? `（${esc(ref)}）` : '');
     const bullet = r.nobullet ? '' : '・';
     rows += `<tr><td class="nm" style="padding-left:${1 + (+r.indent || 0)}em">${bullet}${inlineFmt(r.name, { ...ctx, path: `${rp}.name` })}</td><td>：</td><td class="amt">${a}</td><td>${refHtml}</td><td class="note">${inlineFmt(r.note || '', { ...ctx, path: `${rp}.note` })}</td></tr>`;
   });
@@ -512,7 +520,8 @@ function renderDoc(doc, opts = {}) {
     }
     const chk = mode === 'fill' ? `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" ${off ? '' : 'checked'}></label>` : '';
     const wst = mode !== 'fill' && +b.w > 0 && b.type !== 'gel' && b.type !== 'image' ? `width:${+b.w}mm;max-width:100%;` : '';   // 右端のドラッグで決めた幅
-    const html = `<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${wst}${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
+    const fsz = +b.fs > 0 && +b.fs !== 100 ? `font-size:${+b.fs}%;` : '';   // ブロックごとの文字の大きさ
+    const html = `<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${wst}${fsz}${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
     const prev = groups[groups.length - 1];
     if (mode !== 'fill' && b.beside && prev && b.type !== 'pagebreak' && prev.type !== 'pagebreak') prev.items.push(html);
     else groups.push({ type: b.type, items: [html] });
@@ -676,9 +685,9 @@ function blockEditorHtml(b, i, n) {
         ${b.rows.map((r, j) => {
           const rp = `${bp}.rows.${j}`;
           return `<tr><td>${inp(rp + '.name', r.name)}</td>
-          <td><select data-bind="${rp}.kind">${[['calc', '計算'], ['rest', '残り(合計−他)'], ['text', '固定・空欄'], ['vol', '作製量そのもの']].map(([v, l]) => `<option value="${v}" ${(r.kind || 'calc') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
-          <td>${inp(rp + '.per1', r.per1, '', '60px')}</td><td>${inp(rp + '.unit', r.unit, '', '44px')}</td>
-          <td>${(r.kind === 'text') ? inp(rp + '.value', r.value, '[[ ]] で空欄') : ''}${(r.kind === 'text' || r.kind === 'vol') ? inp(rp + '.ref', r.ref, '（例）目安：…') : ''}</td>
+          <td><select data-bind="${rp}.kind">${[['calc', '計算'], ['rest', '残り(合計−他)'], ['text', '固定・空欄'], ['vol', '作製量と同じ（メスアップ等）'], ['ratio', '作製量 × 割合']].map(([v, l]) => `<option value="${v}" ${(r.kind || 'calc') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+          <td>${r.kind === 'vol' ? '<span class="muted">作製量</span>' : inp(rp + '.per1', r.per1, r.kind === 'ratio' ? '割合 例 0.5' : '', '60px')}</td><td>${inp(rp + '.unit', r.unit, '', '44px')}</td>
+          <td>${(r.kind === 'text') ? inp(rp + '.value', r.value, '[[ ]] で空欄') : ''}${(r.kind === 'text' || r.kind === 'vol' || r.kind === 'ratio') ? inp(rp + '.ref', r.ref, r.kind === 'text' ? '（例）目安：…' : '（例）までメスアップ') : ''}</td>
           <td>${inp(rp + '.note', r.note)}</td><td>${inp(rp + '.indent', r.indent, '', '32px')}</td>
           <td style="white-space:nowrap"><button type="button" class="small" data-act="rowup" data-path="${bp}.rows" data-j="${j}">↑</button><button type="button" class="small" data-act="rowdel" data-path="${bp}.rows" data-j="${j}">×</button></td></tr>`;
         }).join('')}</table>
@@ -715,6 +724,7 @@ function blockEditorHtml(b, i, n) {
       break;
   }
   return `<div class="blk${b.print === false ? ' off' : ''}"><div class="blk-head"><label class="pchk-ed" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" data-rerender="1" ${b.print === false ? '' : 'checked'}> 印刷</label><span class="type">${BLOCK_TYPES[b.type]}</span>
+    ${b.type === 'pagebreak' ? '' : `<label class="fs-ed" title="このブロックの文字の大きさ">文字 <select data-bind="${bp}.fs" data-num="1">${[60, 70, 80, 90, 100, 110, 120, 130, 150].map(v => `<option value="${v}" ${(+b.fs || 100) === v ? 'selected' : ''}>${v}%</option>`).join('')}</select></label>`}
     ${b.beside ? `<span class="badge">前のブロックの右に並べる <button type="button" class="small" data-act="unbeside" data-i="${i}">解除</button></span>` : ''}
     ${+b.w > 0 && b.type !== 'gel' && b.type !== 'image' ? `<span class="badge">幅 ${+b.w}mm <button type="button" class="small" data-act="unw" data-i="${i}">元に戻す</button></span>` : ''}<span class="spacer"></span>
     <button type="button" class="small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
@@ -1254,8 +1264,8 @@ function renderTubes(b, bp, ctx) {
         <rect x="3" y="1" width="34" height="7" fill="#fff" stroke="#000" stroke-width="1.3"/>
         <path d="M6 8 h28 v40 l-9 33 h-10 l-9 -33 z" fill="${fill}" stroke="#000" stroke-width="1.3"/>
       </svg>
-      <div class="tube-mark" style="font-size:${fs}pt">${inlineFmt(t.mark, { ...ctx, mode: 'print' })}</div>
-      ${t.vol ? `<div class="tube-vol" style="font-size:${Math.min(8, fs * 0.7)}pt">${inlineFmt(t.vol, { ...ctx, mode: 'print' })}</div>` : ''}
+      <div class="tube-mark" style="font-size:${(fs / 10.5).toFixed(3)}em">${inlineFmt(t.mark, { ...ctx, mode: 'print' })}</div>
+      ${t.vol ? `<div class="tube-vol" style="font-size:${(Math.min(8, fs * 0.7) / 10.5).toFixed(3)}em">${inlineFmt(t.vol, { ...ctx, mode: 'print' })}</div>` : ''}
     </div>`;
   }).join('');
   const used = [...new Set(b.tubes.map(t => TUBE_KINDS[t.kind] ? t.kind : 's'))];
@@ -1335,20 +1345,41 @@ function renderGel(b, bp, ctx) {
     const ph = `<div class="gel-empty">（泳動画像なし）</div>`;
     return head + ph + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
   }
+  const pc = v => Math.max(40, Math.min(250, num(v) || 100)) / 100;   // 文字の大きさ（%）
   const mks = (b.markers || []).filter(m => m.label);
-  // 目盛りの列（9pt）：ラベル＋目盛り線が入る幅。単位は同じ列の上（または下）に置き、列は単位の幅にも合わせて広がる
+  // 目盛りの列：ラベル＋目盛り線が入る幅（目盛りの文字の大きさに合わせて広がる）。単位は同じ列の上（または下）
   const mkW = mks.length ? Math.max(2.2, ...mks.map(m => textWidthEm(m.label) * 1.1 + 1)) : 0;
   const unitPos = b.unit_pos === 'bottom' ? 'bottom' : 'top';
   const maxW = Math.max(0, ...b.lanes.map(l => textWidthEm(l.name)));
   const nameH = maxW ? Math.min(14, maxW * 0.72 + 0.6) : 0;
   const sub = { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode };
-  const names = maxW ? rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, nameH) : '';
-  const marks = `<div class="g-marks">${b.lanes.map(l => `<div style="left:${l.x * 100}%">${inlineFmt(l.mark, sub)}</div>`).join('')}</div>`;
+  const cap = t => t ? `<div class="g-uc cap">${inlineFmt(t, sub)}</div>` : '<div></div>';
+  const names = maxW ? `<div style="font-size:${pc(b.name_fs)}em">${rotatedNames(b.lanes.map(l => ({ left: `${l.x * 100}%`, html: inlineFmt(l.name, sub) })), ctx, nameH)}</div>` : '';
+  const marks = `<div class="g-marks" style="font-size:${pc(b.lane_fs)}em">${b.lanes.map(l => `<div style="left:${l.x * 100}%">${inlineFmt(l.mark, sub)}</div>`).join('')}</div>`;
   const unit = mks.length && b.unit ? `<div class="g-unit">${esc(b.unit)}</div>` : '';
-  const mkCol = mks.length ? `<div class="g-mk" style="min-width:${mkW}em">${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '<div></div>';
+  const mkCol = mks.length ? `<div class="g-mk" style="min-width:${mkW}em;font-size:${(0.857 * pc(b.mk_fs)).toFixed(3)}em">${mks.map(m => `<div class="g-tick" style="top:${m.y}%">${inlineFmt(m.label, sub)}</div>`).join('')}</div>` : '<div></div>';
+  // 上のラベル（複数レーンをまとめて横線＋文字）。段ごとに1行、段1がレーン名のすぐ上
+  const xs = b.lanes.map(l => l.x), n = xs.length;
+  const edge = (k, side) => {   // k: 0始まりのレーン、side: -1 左端 / +1 右端
+    const nb = xs[k + side] !== undefined ? xs[k + side] : xs[k - side] !== undefined ? 2 * xs[k] - xs[k - side] : xs[k] + side * 0.5 / Math.max(1, n);
+    return xs[k] + (nb - xs[k]) * 0.42;
+  };
+  const groups = (b.groups || []).filter(g => g.text || g.bar !== false);
+  const levels = [...new Set(groups.map(g => +g.level || 1))].sort((a, z) => z - a);
+  const grpRows = levels.map(lv => {
+    const items = groups.filter(g => (+g.level || 1) === lv).map(g => {
+      let a = Math.max(1, Math.min(n, parseInt(g.from) || 1)) - 1, z = Math.max(1, Math.min(n, parseInt(g.to) || n)) - 1;
+      if (a > z) [a, z] = [z, a];
+      const L = edge(a, -1) * 100, R = edge(z, 1) * 100;
+      return `<div class="g-grp${g.bar === false ? '' : ' bar'}" style="left:${L}%;width:${R - L}%"><span>${inlineFmt(g.text || '', sub)}</span></div>`;
+    }).join('');
+    return `${cap((b.grp_caps || {})[lv])}<div class="g-main g-grprow" style="font-size:${pc(b.grp_fs)}em">${items}</div>`;
+  }).join('');
   const html = `<div class="gel" style="width:${(b.width || 80) * 1.64}mm">${head}
     <div class="g-grid">
-      <div class="g-uc">${unitPos === 'top' ? unit : ''}</div><div class="g-main">${names}${marks}</div>
+      ${grpRows}
+      ${names ? `${cap(b.cap_names)}<div class="g-main">${names}</div>` : ''}
+      <div class="g-uc">${unitPos === 'top' ? unit : (b.cap_marks ? inlineFmt(b.cap_marks, sub) : '')}</div><div class="g-main">${marks}</div>
       ${mkCol}<div class="g-main">${gelImgBox(b)}</div>
       ${unitPos === 'bottom' && unit ? `<div class="g-uc bottom">${unit}</div><div></div>` : ''}
     </div></div>`;
@@ -1377,6 +1408,7 @@ function gelPreviewHtml(b, bp) {
 function gelEdHtml(b, bp) {
   if (!b.mix) b.mix = clone(DEFAULT_GEL_MIX);
   b.gel = gelRows(b).map(r => ({ ...r }));
+  if (!b.grp_caps || typeof b.grp_caps !== 'object') b.grp_caps = {};
   if (b.mix_label === undefined) b.mix_label = '泳動サンプル（1レーンあたり）';
   const c = b.crop || { t: 0, b: 0, l: 0, r: 0 };
   const sl = (key, label, val, min, max) => `<label class="sl">${label}<input type="range" min="${min}" max="${max}" step="1" data-bind="${bp}.${key}" data-num="1" data-live="1" value="${val}"><span>${val}</span></label>`;
@@ -1414,7 +1446,27 @@ function gelEdHtml(b, bp) {
     <div class="row" style="margin-top:6px"><b>マーカーの目盛り（左側）</b> 単位 ${inp(bp + '.unit', b.unit, '(bp)', '60px')} を目盛りの <select data-bind="${bp}.unit_pos" data-rerender="1"><option value="top" ${b.unit_pos !== 'bottom' ? 'selected' : ''}>上</option><option value="bottom" ${b.unit_pos === 'bottom' ? 'selected' : ''}>下</option></select> に表示
       <button type="button" class="small" data-fig="mk-add" data-path="${bp}">＋ 目盛りを追加</button></div>
     <table class="ed">${(b.markers || []).map((m, k) => `<tr><td>${inp(`${bp}.markers.${k}.label`, m.label, '例：1k', '80px')}</td><td>上から ${inp(`${bp}.markers.${k}.y`, m.y, '', '50px')} %</td>
-      <td><button type="button" class="small" data-fig="mk-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>`;
+      <td><button type="button" class="small" data-fig="mk-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:8px"><b>文字の大きさ（%）</b>
+      目盛りの数字 ${inp(bp + '.mk_fs', b.mk_fs, '100', '50px')}
+      レーンの記号 ${inp(bp + '.lane_fs', b.lane_fs, '100', '50px')}
+      サンプル名 ${inp(bp + '.name_fs', b.name_fs, '100', '50px')}
+      上のラベル ${inp(bp + '.grp_fs', b.grp_fs, '100', '50px')}
+      <span class="muted">目盛りの数字が重なるときは 70〜80 くらいに</span></div>
+    <div class="row" style="margin-top:8px"><b>上のラベル（複数レーンをまとめて横線＋文字）</b>
+      <button type="button" class="small" data-fig="grp-add" data-path="${bp}">＋ ラベルを追加</button>
+      <span class="muted">例：1〜8 レーンの上に横線を引いて「サンプル名」、「℃」「濃度」など</span></div>
+    ${(b.groups || []).length ? `<table class="ed"><tr><th>段（1＝いちばん下）</th><th>レーン</th><th>文字</th><th>横線</th><th></th></tr>
+    ${b.groups.map((g, k) => `<tr><td><select data-bind="${bp}.groups.${k}.level" data-rerender="1">${[1, 2, 3].map(v => `<option value="${v}" ${(+g.level || 1) === v ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+      <td><input type="number" min="1" max="${b.lanes.length}" data-bind="${bp}.groups.${k}.from" value="${esc(g.from ?? 1)}" style="width:52px"> 〜 <input type="number" min="1" max="${b.lanes.length}" data-bind="${bp}.groups.${k}.to" value="${esc(g.to ?? b.lanes.length)}" style="width:52px"></td>
+      <td>${inp(`${bp}.groups.${k}.text`, g.text, '例：サンプル名、37℃、10 ng/uL')}</td>
+      <td><input type="checkbox" data-bind="${bp}.groups.${k}.bar" ${g.bar !== false ? 'checked' : ''}></td>
+      <td><button type="button" class="small" data-fig="grp-del" data-path="${bp}" data-k="${k}">×</button></td></tr>`).join('')}</table>` : ''}
+    <div class="row" style="margin-top:6px"><b>左側の見出し</b>（「bp」のように、行の左に付ける文字）
+      サンプル名の行 ${inp(bp + '.cap_names', b.cap_names, '例：サンプル', '100px')}
+      レーン記号の行 ${inp(bp + '.cap_marks', b.cap_marks, '例：Lane', '80px')}
+      ${[...new Set((b.groups || []).map(g => +g.level || 1))].sort().map(lv => `上のラベル段${lv} ${inp(`${bp}.grp_caps.${lv}`, (b.grp_caps || {})[lv], '例：濃度(uL)', '100px')}`).join(' ')}</div>
+    <div class="muted">「レーン記号の行」の見出しは、単位（bp など）を目盛りの「下」にしたときに表示されます。</div>`;
 }
 // 図のボタン操作。true を返したら描き直す
 function figAction(doc, t) {
@@ -1437,6 +1489,8 @@ function figAction(doc, t) {
     case 'gmm-del': b.mm.rows.splice(+t.dataset.k, 1); return true;
     case 'gmm-reset': b.mm = DEFAULT_GIB_MM(); return true;
     case 'mk-del': b.markers.splice(+t.dataset.k, 1); return true;
+    case 'grp-add': (b.groups = b.groups || []).push({ level: 1, from: 1, to: b.lanes.length, text: '', bar: true }); return true;
+    case 'grp-del': b.groups.splice(+t.dataset.k, 1); return true;
     case 'from-tubes': {
       const gi = doc.blocks.indexOf(b);
       const before = doc.blocks.slice(0, gi).filter(x => x.type === 'tubes');

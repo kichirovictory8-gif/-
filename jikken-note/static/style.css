@@ -68,7 +68,7 @@ main { min-width: 0; }
 .legend .sw { display: inline-block; padding: 0 6px; margin: 0 2px; border-radius: 2px; }
 
 /* 入力モード：可変欄 */
-input.vin { font-family: var(--mincho); font-size: 10.5pt; background: var(--var); border: 1px solid #e0b400; border-radius: 3px; padding: 0 3px; margin: 0 1px; min-width: 3em; height: 1.45em; vertical-align: baseline; }
+input.vin { font-family: var(--mincho); font-size: 1em; background: var(--var); border: 1px solid #e0b400; border-radius: 3px; padding: 0 3px; margin: 0 1px; min-width: 3em; height: 1.45em; vertical-align: baseline; }
 input.vin:focus { outline: 2px solid #f0a000; background: #fff8cc; }
 input.vin.empty { background: #ffe066; border-color: #d08b00; }
 
@@ -101,7 +101,7 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 }
 .sheet .date-line { text-align: right; font-size: 10.5pt; margin-bottom: 1mm; }
 .sheet h1.ptitle { font-size: 14pt; font-weight: bold; margin: 0 0 2.5mm; line-height: 1.4; }
-.sheet .h-sub { font-size: 14pt; font-weight: bold; margin: 3mm 0 1.5mm; line-height: 1.4; }
+.sheet .h-sub { font-size: 1.333em; font-weight: bold; margin: 3mm 0 1.5mm; line-height: 1.4; }
 .sheet .blk-h { font-weight: bold; margin: 2.5mm 0 0.5mm; }
 .sheet .blk-h .extra { font-weight: normal; }
 .sheet .ln { white-space: pre-wrap; min-height: 1.6em; }
@@ -164,14 +164,14 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 .sheet .tubes { margin: 1.5mm 0 2.5mm; break-inside: avoid; }
 .sheet .rot-names { position: relative; }
 .sheet .rot { position: absolute; bottom: 0.15em; width: 0; height: 0; }
-.sheet .rot span { position: absolute; left: -0.25em; bottom: 0; transform-origin: 0 100%; transform: rotate(-45deg); white-space: nowrap; line-height: 1.1; font-size: 10pt; }
+.sheet .rot span { position: absolute; left: -0.25em; bottom: 0; transform-origin: 0 100%; transform: rotate(-45deg); white-space: nowrap; line-height: 1.1; font-size: 0.952em; }
 .sheet .tube-strip { height: 1.2mm; border: 0.8pt solid #000; border-bottom: none; margin: 0 0.6mm -0.2mm; }
 .sheet .tube-row { display: flex; }
 .sheet .tube { position: relative; aspect-ratio: 40 / 84; }
 .sheet .tube-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .sheet .tube-mark { position: absolute; left: 0; right: 0; top: 24%; text-align: center; font-weight: bold; line-height: 1.1; }
 .sheet .tube-vol { position: absolute; left: 0; right: 0; top: 50%; text-align: center; line-height: 1.1; }
-.sheet .tube-legend { font-size: 9pt; margin-top: 1mm; }
+.sheet .tube-legend { font-size: 0.857em; margin-top: 1mm; }
 .sheet .tube-legend .sw { display: inline-block; width: 0.9em; height: 0.9em; border: 0.6pt solid #000; vertical-align: -0.1em; margin-right: 0.2em; }
 .sheet .tube-legend .sw.hatch { background: repeating-linear-gradient(45deg, #fff 0 2px, #999 2px 3px) !important; }
 .sheet .gel { margin: 1.5mm 0 2.5mm; break-inside: avoid; }
@@ -179,13 +179,13 @@ input.vin.empty { background: #ffe066; border-color: #d08b00; }
 /* 左の列＝目盛り（と単位）、右の列＝レーン名・画像。列の幅は目盛りと単位の両方が入る広さになる */
 .sheet .g-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); }
 .sheet .g-main { position: relative; min-width: 0; }
-.sheet .g-uc { font-size: 9pt; text-align: right; padding-right: 0.15em; align-self: end; white-space: nowrap; }
+.sheet .g-uc { font-size: 0.857em; text-align: right; padding-right: 0.15em; align-self: end; white-space: nowrap; }
 .sheet .g-uc.bottom { align-self: start; padding-top: 0.2em; }
 .sheet .g-marks { position: relative; height: 1.4em; }
 .sheet .g-marks div { position: absolute; transform: translateX(-50%); font-weight: bold; bottom: 0.1em; white-space: nowrap; }
 .sheet .g-img { position: relative; overflow: hidden; background: #000; width: 100%; }
 .sheet .g-img img { position: absolute; max-width: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-.sheet .g-mk { flex: none; position: relative; font-size: 9pt; }
+.sheet .g-mk { flex: none; position: relative; font-size: 0.857em; }
 .sheet .g-unit { line-height: 1.3; }
 .sheet .g-tick { position: absolute; right: 0; transform: translateY(-50%); padding-right: 0.7em; white-space: nowrap; }
 .sheet .g-tick::after { content: ""; position: absolute; right: 0; top: 50%; width: 0.45em; border-top: 0.6pt solid #000; }
@@ -317,7 +317,7 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 /* 鋳型DNA・段階希釈 */
 .sheet .dil { break-inside: avoid; margin: 1mm 0 1.5mm; }
 .sheet .dil-info { margin: 0.3mm 0 0.5mm 1em; }
-.sheet table.dil-t { margin-left: 1em; font-size: 9.5pt; }
+.sheet table.dil-t { margin-left: 1em; font-size: 0.905em; }
 .sheet table.dil-t td { white-space: nowrap; }
 .sheet table.dil-t td.num { text-align: right; }
 .sheet table.dil-t td.note { text-align: left; white-space: normal; min-width: 12mm; }
@@ -327,15 +327,22 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .sheet .gel-recipe select { font: inherit; padding: 0 2px; background: var(--var); border: 1px solid #e0b400; border-radius: 3px; }
 /* Gibson */
 .sheet .gib { break-inside: avoid; margin: 1mm 0 1.5mm; }
-.sheet table.gib-t { font-size: 9pt; }
+.sheet table.gib-t { font-size: 0.857em; }
 .sheet table.gib-t td { padding: 0.3mm 1.2mm; }
 .sheet table.gib-t td { white-space: nowrap; }
 .sheet table.gib-t td.num { text-align: right; }
 .sheet table.gib-t td.need { font-weight: bold; }
 .sheet table.gib-t tr.sum td { border-top: 1pt solid #000; }
-.sheet .gib-msg { margin: 0 0 0 1em; font-size: 9.5pt; }
+.sheet .gib-msg { margin: 0 0 0 1em; font-size: 0.905em; }
 .blk-head .badge { font-size: 12px; color: #1f5fa8; background: #e8f1fb; border-radius: 4px; padding: 1px 6px; }
 .sheet .gib-mixes { display: flex; gap: 10mm; flex-wrap: wrap; align-items: flex-start; margin: 1mm 0 0 1em; }
 .sheet .gib-mix table.mat-t td.nm { min-width: 30mm; }
 .sheet .gib-mix .gib-msg { margin: 0; max-width: 70mm; }
 .sheet .gib-mm { margin-top: 1.5mm; }
+/* 泳動画像の上のラベル（複数レーンまとめて） */
+.sheet .g-grprow { position: relative; height: 1.75em; }
+.sheet .g-grp { position: absolute; bottom: 0.25em; display: flex; justify-content: center; white-space: nowrap; line-height: 1.2; }
+.sheet .g-grp.bar { border-bottom: 0.8pt solid #000; }
+.sheet .g-grp span { display: inline-block; padding: 0 0.2em; }
+.sheet .g-uc.cap { align-self: center; padding-right: 0.4em; }
+.blk-head .fs-ed { font-size: 12px; color: #555; white-space: nowrap; } .blk-head .fs-ed select { padding: 1px 2px; font-size: 12px; }

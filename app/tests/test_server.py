@@ -128,6 +128,17 @@ class ServerTest(unittest.TestCase):
         s, _ = self.call("GET", "/api/meta", headers={"Host": "evil.example:80"})
         self.assertEqual(s, 403)
 
+    def test_shortcut_api(self):
+        import sys
+        s, m = self.call("GET", "/api/meta")
+        self.assertEqual(m["can_shortcut"], sys.platform == "win32")
+        if sys.platform != "win32":
+            s, e = self.call("POST", "/api/shortcut", {})
+            self.assertEqual(s, 400)
+            self.assertIn("Windows", e["error"])
+        with urllib.request.urlopen(self.base + "/icon.ico") as r:
+            self.assertTrue(r.read(4) == b"\x00\x00\x01\x00")
+
     def test_static(self):
         with urllib.request.urlopen(self.base + "/") as r:
             self.assertIn("text/html", r.headers["Content-Type"])

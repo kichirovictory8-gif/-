@@ -4,6 +4,7 @@
     python server.py --no-browser  # ブラウザを開かない
     python server.py --port 8800   # ポートを指定
     python server.py --lan         # iPad など同じ Wi-Fi の機器からも使う（パスコード必須）
+    python server.py --create-shortcut  # デスクトップにショートカットを作る（Windows）
 
 データの場所は環境変数 YAKUSHI_FLASH_DIR で変更できる。
 """
@@ -25,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, srs, stats, storage  # noqa: E402
+from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, shortcut, srs, stats, storage  # noqa: E402
 from flashcards.bulk import parse_bulk  # noqa: E402
 from flashcards.subjects import SUBJECTS  # noqa: E402
 
@@ -210,6 +211,7 @@ class Handler(BaseHTTPRequestHandler):
                 "mature_stage": srs.MATURE_STAGE, "day_boundary_hour": srs.DAY_BOUNDARY_HOUR,
                 "today": st.today().isoformat(), "db_path": str(app.db_file),
                 "backup_dir": str(app.backups), "lan": app.lan, "is_local": self._is_local(),
+                "can_shortcut": sys.platform == "win32" and self._is_local(),
             }
             if app.lan and self._is_local():
                 meta["passcode"] = app.auth.passcode
@@ -270,6 +272,14 @@ class Handler(BaseHTTPRequestHandler):
             days = max(1, min(365, _int(q.get("days", 14), "days")))
             min_again = max(1, min(50, _int(q.get("min", 2), "min")))
             return self._json(weak_with_plain(stats.weak(conn, st.today(), days, min_again)))
+
+        if route == ("POST", "shortcut"):
+            if not self._is_local():
+                raise ApiError(403, "ショートカットは PC からだけ作れます")
+            try:
+                return self._json({"created": shortcut.create_desktop_shortcuts()})
+            except RuntimeError as e:
+                raise ApiError(400, str(e)) from None
 
         if route == ("POST", "backup"):
             path = storage.make_backup(conn, app.backups, "manual")
@@ -391,7 +401,20 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--lan", action="store_true", help="同じ Wi-Fi の機器（iPad など）からも使う")
+    ap.add_argument("--create-shortcut", action="store_true", help="デスクトップにショートカットを作って終了")
     args = ap.parse_args(argv)
+
+    if args.create_shortcut:
+        try:
+            paths = shortcut.create_desktop_shortcuts()
+        except RuntimeError as e:
+            print(e)
+            return 1
+        print("デスクトップにショートカットを作りました：")
+        for path in paths:
+            print("  " + path)
+        print("今後は、デスクトップのアイコンをダブルクリックすると起動できます。")
+        return 0
 
     running = running_instance(args.port)
     if running:

@@ -1034,6 +1034,9 @@ async function pageData() {
   $main.append(h(`<div>
     <h1>データ（バックアップ・書き出し・取り込み）</h1>
     ${ipad}
+    ${m.can_shortcut ? `<div class="panel"><h2>デスクトップのショートカット</h2>
+      <div class="row"><button class="btn primary" id="sc">デスクトップにショートカットを作る</button>
+        <span class="sub">「国試フラッシュカード」と「国試フラッシュカード（iPad）」の2つを作ります（同じ名前があれば作り直します）。</span></div></div>` : ""}
     <div class="panel"><h2>データファイルの場所</h2>
       <div class="path">${esc(m.db_path)}</div>
       <p class="sub">カードと評価の履歴はすべてこの1つのファイルに入っています。このファイルをコピーすればバックアップになります。</p>
@@ -1066,6 +1069,9 @@ async function pageData() {
   $main.querySelector("#newcode")?.addEventListener("click", async () => {
     if (!confirm("パスコードを変更します。登録済みの iPad はすべて新しいパスコードの入力が必要になります。よろしいですか？")) return;
     try { const r = await api("POST", "lan/passcode", {}); $main.querySelector("#code").textContent = r.passcode; toast("パスコードを変更しました"); } catch (e) { fail(e); }
+  });
+  $main.querySelector("#sc")?.addEventListener("click", async () => {
+    try { const r = await api("POST", "shortcut", {}); toast(`デスクトップにショートカットを${r.created.length}つ作りました`); } catch (e) { fail(e); }
   });
   $main.querySelector("#bk").addEventListener("click", async () => {
     try { const r = await api("POST", "backup", {}); toast("バックアップを作りました：" + r.path.split(/[\\/]/).pop()); } catch (e) { fail(e); }

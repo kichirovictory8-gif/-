@@ -385,3 +385,13 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .ac-hint { font-size: 11px; color: #888; padding: 3px 12px 2px; border-top: 1px solid #eee; margin-top: 2px; }
 .sheet .flow.link, .sheet .flow.link .link-body { display: flow-root; }
 .sheet .nbr.box { border-color: #000; border-radius: 0.5em; }
+/* まとめて中かっこ（右側）＋コメント */
+.sheet .brw { display: flex; align-items: stretch; width: fit-content; max-width: 100%; }
+.sheet .brw-body { flex: 0 1 auto; min-width: 0; }
+.sheet .brace { flex: none; width: 0.6em; display: flex; flex-direction: column; margin: 0.15em 0 0.15em 0.4em; }
+.sheet .brace svg { display: block; width: 100%; overflow: visible; fill: none; stroke: #000; stroke-width: 1.2px; vector-effect: non-scaling-stroke; }
+.sheet .brace svg path { vector-effect: non-scaling-stroke; }
+.sheet .brace .bt, .sheet .brace .bb { height: 0.36em; flex: none; }
+.sheet .brace .bm { height: 0.72em; flex: none; }
+.sheet .brace .bl { flex: 1 1 0; min-height: 0; background: linear-gradient(#000, #000) no-repeat 50% 0 / 1.2px 100%; }
+.sheet .brw-lbl { align-self: center; padding-left: 0.35em; white-space: nowrap; }

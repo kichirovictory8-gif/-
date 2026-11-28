@@ -167,7 +167,9 @@ function renderText(str, ctx, link) {
     const t = text.trim();
     // 「((」〜「))」の間は、まとめてかっこでくくる
     if (BR_OPEN.test(t)) { br = []; brk = brKind(t); continue; }
-    if (BR_CLOSE.test(t)) { if (br) unit += notesHtml([{ open: true, kind: brk }, ...br, { close: true }], 0, ctx); br = null; continue; }
+    if (BRACE_OPEN.test(t)) { br = []; brk = 'brace'; continue; }
+    const bcm = t.match(BRACE_CLOSE);
+    if (bcm || BR_CLOSE.test(t)) { if (br) unit += notesHtml([{ open: true, kind: brk }, ...br, { close: true, label: bcm ? bcm[1] : '' }], 0, ctx); br = null; continue; }
     if (br) { br.push(text === '' ? { blank: true } : { ind, text }); continue; }
     if (text === '') { flush(); out += '<div class="gap"></div>'; continue; }
     if (ind === 0) flush();
@@ -185,6 +187,17 @@ const ARROW_LINE_HTML = '<div class="flow-arrow noh"><div class="fa-line"></div>
 // 補足をまとめてくくる：「((」〜「))」の行＝角の丸いかっこ、「{{」〜「}}」の行＝角の丸い枠
 const BR_OPEN = /^(?:[(（]{2}|[{｛]{2})$/, BR_CLOSE = /^(?:[)）]{2}|[}｝]{2})\s*(.*)$/;
 const brKind = t => /^[{｛]/.test(t) ? 'box' : 'paren';
+// 数行まとめて右側に中かっこ「}」を付け、その右にコメント：「>>」〜「<< コメント」の行
+//   コメントは中かっこのとがった所（高さの中心）にそろう
+const BRACE_OPEN = /^[>＞]{2}$/, BRACE_CLOSE = /^[<＜]{2}\s*(.*)$/;
+const isMarker = t => BR_OPEN.test(t) || BR_CLOSE.test(t) || BRACE_OPEN.test(t) || BRACE_CLOSE.test(t);
+function braceWrap(inner, label, ctx, style = '') {
+  // 上下の巻き込みと中央のとがりは大きさ固定、その間の縦線だけが行の数に合わせて伸びる
+  const brace = '<div class="brace"><svg class="bt" viewBox="0 0 10 6" preserveAspectRatio="none"><path d="M0,0.7 Q5,0.7 5,6"/></svg><div class="bl"></div>'
+    + '<svg class="bm" viewBox="0 0 10 12" preserveAspectRatio="none"><path d="M5,0 Q5,6 10,6 Q5,6 5,12"/></svg><div class="bl"></div>'
+    + '<svg class="bb" viewBox="0 0 10 6" preserveAspectRatio="none"><path d="M5,0 Q5,5.3 0,5.3"/></svg></div>';
+  return `<div class="brw" style="${style}"><div class="brw-body">${inner}</div>${brace}${label ? `<div class="brw-lbl">${inlineFmt(label, ctx)}</div>` : ''}</div>`;
+}
 // 補足の行の並び（{ind,text} / {blank} / {open} / {close}）→ HTML
 function notesHtml(notes, minInd, ctx) {
   let h = '', buf = null, kind = 'paren';
@@ -192,7 +205,10 @@ function notesHtml(notes, minInd, ctx) {
   for (const n of notes) {
     if (n.open) { buf = []; kind = n.kind || 'paren'; continue; }
     if (n.close) {
-      if (buf && buf.length) {
+      if (buf && buf.length && kind === 'brace') {
+        const base = Math.min(...buf.filter(x => !x.blank).map(x => Math.max(x.ind, minInd)));
+        h += braceWrap(buf.map(x => x.blank ? '<div class="gap"></div>' : lineHtml(x.text, Math.max(x.ind, minInd) - base, ctx)).join(''), n.label, ctx, `margin-left:${base}em`);
+      } else if (buf && buf.length) {
         const base = Math.min(...buf.filter(x => !x.blank).map(x => Math.max(x.ind, minInd)));
         h += `<div class="nbr${kind === 'box' ? ' box' : ''}" style="margin-left:${base}em">${buf.map(x => x.blank ? '<div class="gap"></div>' : lineHtml(x.text, Math.max(x.ind, minInd) - base, ctx)).join('')}</div>`;
       }
@@ -213,43 +229,68 @@ function renderSteps(str, ctx, linkOut, lead) {
   const isNote = (ind, text) => ind > 0 || /^[※＊*]/.test(String(text).replace(/\*\*|__|==|!!/g, ''));
   const rows = String(str || '').split('\n').map(splitIndent).filter(r => !/^[↓⇓]$/.test(r.text.trim()));
   const groups = [[]];
-  let inBr = false;
+  let inBr = false, inBrace = false, pendBrace = false, stepBrace = false;
   const addNote = (g, n) => { if (g.length) g[g.length - 1].notes.push(n); else g.push({ step: null, notes: [n] }); };
+  const nextReal = i => rows.slice(i + 1).find(x => x.text.trim() !== '' && !BR_OPEN.test(x.text.trim()) && !BRACE_OPEN.test(x.text.trim()));
   rows.forEach((r, i) => {
     const g = groups[groups.length - 1];
     const t = r.text.trim();
     if (BR_OPEN.test(t)) { inBr = true; addNote(g, { open: true, kind: brKind(t) }); return; }
     if (BR_CLOSE.test(t)) { if (inBr) addNote(g, { close: true }); inBr = false; return; }
+    if (BRACE_OPEN.test(t)) {
+      // 次の行が操作の項目なら項目をまとめる、補足なら補足をまとめる
+      const nx = nextReal(i);
+      if (nx && !isNote(nx.ind, nx.text)) { pendBrace = true; stepBrace = true; }
+      else { inBr = true; inBrace = true; addNote(g, { open: true, kind: 'brace' }); }
+      return;
+    }
+    const bc = t.match(BRACE_CLOSE);
+    if (bc) {
+      if (inBrace) { addNote(g, { close: true, label: bc[1] }); inBr = false; inBrace = false; }
+      else if (stepBrace) { const last = g[g.length - 1]; if (last) { last.braceClose = true; last.label = bc[1]; } stepBrace = false; }
+      return;
+    }
     if (t === '') {
       if (inBr) { addNote(g, { blank: true }); return; }
-      const next = rows.slice(i + 1).find(x => x.text.trim() !== '');
-      const nt = next ? next.text.trim() : '';
-      if (g.length && next && (isNote(next.ind, next.text) || BR_OPEN.test(nt))) g[g.length - 1].notes.push({ blank: true });
+      const next = nextReal(i);
+      const opener = rows.slice(i + 1).find(x => x.text.trim() !== '');
+      const ot = opener ? opener.text.trim() : '';
+      if (g.length && next && (isNote(next.ind, next.text) || BR_OPEN.test(ot) || (BRACE_OPEN.test(ot) && isNote(next.ind, next.text)))) g[g.length - 1].notes.push({ blank: true });
       else if (g.length) groups.push([]);
       return;
     }
     if (inBr || isNote(r.ind, r.text)) addNote(g, { ind: inBr ? Math.max(r.ind, 1) : r.ind, text: r.text });
-    else g.push({ step: r.text, notes: [] });
+    else { g.push({ step: r.text, notes: [], braceOpen: pendBrace }); pendBrace = false; }
   });
   const parts = [];
   const lastG = groups.filter(g => g.length).pop();
   const firstG = groups.find(g => g.length);
   for (const g of groups) {
     if (!g.length) continue;
-    let h = '';
+    let h = '', bw = null;
     g.forEach((st, i) => {
       // 項目・補足・次への矢印をひとまとまりにして、ページの途中で切れないようにする
-      let u = st.step !== null ? lineHtml(st.step, 0, ctx) : '';
+      const line = st.step !== null ? lineHtml(st.step, 0, ctx) : '';
+      let fl = '';
       const next = g[i + 1];
       const out = !next && g === lastG && linkOut && st.step !== null;   // 次の「操作手順」ブロックへ矢印でつなぐ
       if (st.step !== null && ((next && next.step !== null) || out)) {
         const lineOnly = out && linkOut === 'line';
-        u += `<div class="flow">${lineOnly ? ARROW_LINE_HTML : ARROW_HTML}${notesHtml(st.notes, 1.2, ctx)}<div class="flow-end${lineOnly ? ' short' : ''}"></div></div>`;
+        fl = `<div class="flow">${lineOnly ? ARROW_LINE_HTML : ARROW_HTML}${notesHtml(st.notes, 1.2, ctx)}<div class="flow-end${lineOnly ? ' short' : ''}"></div></div>`;
       } else {
-        u += notesHtml(st.notes, 0, ctx);
+        fl = notesHtml(st.notes, 0, ctx);
       }
-      if (lead && g === firstG && i === 0) u = `<div class="flow lead">${ARROW_HTML}<div class="flow-end"></div></div>` + u;   // 前のブロックからの矢印
-      h += `<div class="stepunit keep">${u}</div>`;
+      const ld = lead && g === firstG && i === 0 ? `<div class="flow lead">${ARROW_HTML}<div class="flow-end"></div></div>` : '';   // 前のブロックからの矢印
+      // 項目を中かっこでまとめるとき：最後の項目の行までを中かっこの中に入れ、その下の矢印は外に出す
+      if (st.braceOpen && !bw) bw = { inner: '' };
+      if (bw) {
+        if (st.braceClose || i === g.length - 1) {
+          h += `<div class="stepunit keep">${ld}${braceWrap(bw.inner + line, st.label, ctx)}${fl}</div>`;
+          bw = null;
+        } else bw.inner += ld + line + fl;
+        return;
+      }
+      h += `<div class="stepunit keep">${ld}${line}${fl}</div>`;
     });
     parts.push(h);
   }
@@ -808,6 +849,7 @@ function markupBar() {
     <span class="lo-w">字下げの幅 <input type="number" class="lo-n" min="0" max="20" step="0.5" value="2" style="width:56px"> 文字に <button type="button" data-lo="set">そろえる</button></span>
     <button type="button" data-acw="1" title="英数字を打ったときに出る候補（例：v → vortex）">予測変換の単語</button>
     <button type="button" data-lo="br" title="選んだ補足の行を、まとめて角の丸いかっこでくくる（「((」と「))」の行で囲む）">まとめてかっこ （ ）</button>
+    <button type="button" data-lo="brace" title="選んだ行の右側に中かっこ「}」を付け、その右にコメントを書く（「>>」と「<< コメント」の行で囲む。「<<」の後ろに書いた文字がコメントになる）">まとめて中かっこ ｝＋コメント</button>
     <button type="button" data-lo="box" title="選んだ補足の行を、まとめて角の丸い枠で囲む（「{{」と「}}」の行で囲む）">まとめて枠で囲む ▢</button></div>`;
 }
 // ---------- 予測変換（「v」→ vortex / vortex & flushing など。全角で打ってもよい） ----------
@@ -925,9 +967,10 @@ function lineOp(kind, el = lastField, n) {
     lines = lines.map(l => l.trim() ? pre + l.slice(lead(l).length) : l);
   } else if (kind === 'br') lines = ['((', ...lines, '))'];
   else if (kind === 'box') lines = ['{{', ...lines, '}}'];
+  else if (kind === 'brace') lines = ['>>', ...lines, '<< '];
   const txt = lines.join('\n');
   el.value = v.slice(0, a) + txt + v.slice(z);
-  if (kind === 'br' || kind === 'box') { el.selectionStart = el.selectionEnd = a + txt.length; }   // 「))」の後ろにカーソル（かっこの右の文字を続けて書ける）
+  if (kind === 'br' || kind === 'box' || kind === 'brace') { el.selectionStart = el.selectionEnd = a + txt.length; }   // 「))」の後ろにカーソル（かっこの右の文字を続けて書ける）
   else { el.selectionStart = a; el.selectionEnd = a + txt.length; }
   el.focus();
   el.dispatchEvent(new Event('input', { bubbles: true }));

@@ -312,9 +312,9 @@ function renderDilution(b, bp, ctx) {
     ? `<input class="vin${b.conc === '' || b.conc == null ? ' empty' : ''}" data-num="1" data-path="${bp}.conc" data-key="${bp}.conc" value="${esc(b.conc ?? '')}" placeholder="濃度" style="width:4.5em">`
     : (b.conc !== '' && b.conc != null ? `<span class="vf">${esc(b.conc)}</span>` : '<span class="vf blank" style="min-width:3em">&nbsp;</span>');
   const nm = b.name ? `　${inlineFmt(b.name, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}` : '';
-  const head = `<div class="blk-h">【${inlineFmt(b.label || '鋳型DNA', { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}】<span class="extra">${nm}</span></div>
+  const head = `<div data-part="h"><div class="blk-h">【${inlineFmt(b.label || '鋳型DNA', { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}】<span class="extra">${nm}</span></div>
     <div class="dil-info">原液の濃度：${concIn} ${unit}</div>
-    <div class="dil-info">1反応（1レーン）に ${cell(fmtNum(d.v), '2em')} uL 使用</div>`;
+    <div class="dil-info">1反応（1レーン）に ${cell(fmtNum(d.v), '2em')} uL 使用</div></div>`;
   const no = k => k < 0 ? '原液' : (b.marks === 'num' ? String(k + 1) : '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'[k] || String(k + 1));
   const dil = esc(b.diluent || '1/10TE');
   let rows = '';
@@ -325,7 +325,7 @@ function renderDilution(b, bp, ctx) {
       <td class="note">${inlineFmt(r.note, { ...ctx, mode: ctx.mode === 'fill' ? 'print' : ctx.mode })}</td></tr>`;
   });
   const hasNote = d.rows.some(r => r.note);
-  const table = `<table class="grid dil-t${hasNote ? '' : ' no-note'}"><tr class="hr"><td>No.</td><td>希釈</td><td>濃度</td><td>鋳型量<br>(1反応)</td><td>前の液</td><td>${dil}</td><td>作製量</td><td>メモ</td></tr>${rows}</table>`;
+  const table = `<table class="grid dil-t${hasNote ? '' : ' no-note'}" data-part="table"><tr class="hr"><td>No.</td><td>希釈</td><td>濃度</td><td>鋳型量<br>(1反応)</td><td>前の液</td><td>${dil}</td><td>作製量</td><td>メモ</td></tr>${rows}</table>`;
   return `<div class="dil">${head}${table}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（倍率・段数・作製量など）</summary>${dilEdHtml(b, bp)}</details>` : '');
 }
 function dilEdHtml(b, bp) {
@@ -395,11 +395,11 @@ function renderGibson(b, bp, ctx) {
     <td class="num">${calc(f3(r.pmol))}</td>
     <td class="num">${field(`${bp}.frags.${r.k}.conc`, r.f.conc, 'ng/uL', '4em')}</td>
     <td class="num need">${calc(f2(r.vol))}</td>${multCol ? `<td class="num need">${calc(f2(r.vol * g.mult))}</td>` : ''}</tr>`).join('');
-  const head = `<div class="blk-h">【${inlineFmt(b.label || 'Gibson assembly', sub)}】<span class="extra">${b.note ? inlineFmt(b.note, sub) : ''}</span></div>`;
-  const table = `<table class="grid gib-t"><tr class="hr"><td></td><td>断片名</td><td>長さ<br>(bp)</td><td>分子量<br>(g/mol)</td><td>質量<br>(ng)</td><td>モル<br>(pmol)</td><td>濃度<br>(ng/uL)</td><td>必要量<br>(uL)</td>${multCol ? `<td>×${esc(fmtNum(g.mult))}<br>(uL)</td>` : ''}</tr>${trs}</table>`;
+  const head = `<div class="blk-h" data-part="h">【${inlineFmt(b.label || 'Gibson assembly', sub)}】<span class="extra">${b.note ? inlineFmt(b.note, sub) : ''}</span></div>`;
+  const table = `<table class="grid gib-t" data-part="table"><tr class="hr"><td></td><td>断片名</td><td>長さ<br>(bp)</td><td>分子量<br>(g/mol)</td><td>質量<br>(ng)</td><td>モル<br>(pmol)</td><td>濃度<br>(ng/uL)</td><td>必要量<br>(uL)</td>${multCol ? `<td>×${esc(fmtNum(g.mult))}<br>(uL)</td>` : ''}</tr>${trs}</table>`;
   // 断片（サンプル）＝vector＋insert＋stMilliQ、断片（Control）＝vector＋stMilliQ。どちらも合計 g.max uL
   const water = esc(b.water || 'stMilliQ');
-  const mix = (title, rows, dryKey) => {
+  const mix = (title, rows, dryKey, part) => {
     const ready = rows.every(r => !isNaN(r.vol));
     const sum = rows.reduce((a, r) => a + (isNaN(r.vol) ? 0 : r.vol), 0);
     const over = ready && sum > g.max + 1e-9;
@@ -408,25 +408,29 @@ function renderGibson(b, bp, ctx) {
       + `<tr><td class="nm">・${water}</td><td>：</td><td class="amt">${ready && !over ? calc(f2(g.max - sum)) : calc('')}uL</td></tr>`
       + `<tr class="total"><td class="nm">　Total</td><td>：</td><td class="amt">${esc(fmtNum(g.max))}uL</td></tr>`;
     const warn = over ? `<div class="gib-msg red">断片の合計が ${f2(sum)} uL で ${esc(fmtNum(g.max))} uL を超えるため、減圧乾燥で濃縮します。</div>` : '';
-    // 減圧乾燥が必要なとき：操作手順と、乾燥後の液量（自分で入力）から stMilliQ を計算した表を続けて出す
+    // 減圧乾燥が必要なとき：vector・insert をそれぞれ減圧乾燥 → 乾燥後の量（自分で入力）＋ stMilliQ で合計 g.max uL
     let dry = '';
     if (over) {
-      const dv = num(b[dryKey]);
-      const what = rows.length > 1 ? 'vector と insert' : 'vector';
-      const left = g.max - dv;
-      const bad = !isNaN(dv) && left < -1e-9;
-      dry = `<div class="gib-flow">↓</div><div class="gib-step">・${rows.length > 1 ? `${what}を混ぜて減圧乾燥` : `${what}を減圧乾燥`}（${field(`${bp}.${dryKey}`, b[dryKey], '液量', '3.5em')} uL まで）</div>
+      if (!b.dry || typeof b.dry !== 'object') b.dry = {};
+      if (!Array.isArray(b.dry[dryKey])) b.dry[dryKey] = [];
+      const dv = rows.map(r => num(b.dry[dryKey][r.k]));
+      const dsum = dv.reduce((a, v) => a + (isNaN(v) ? 0 : v), 0);
+      const allIn = dv.every(v => !isNaN(v));
+      const left = g.max - dsum;
+      const bad = allIn && left < -1e-9;
+      const what = rows.length > 1 ? 'vector と insert をそれぞれ' : 'vector を';
+      dry = `<div class="gib-flow">↓</div><div class="gib-step">・${what}減圧乾燥</div>
         <div class="gib-flow">↓</div>
         <div>〈${title}・減圧乾燥後〉</div><table class="mat-t">
-          <tr><td class="nm">・${rows.length > 1 ? 'vector＋insert' : 'vector'}（減圧乾燥後）</td><td>：</td><td class="amt">${isNaN(dv) ? calc('') : calc(f2(dv))}uL</td></tr>
-          <tr><td class="nm">・${water}</td><td>：</td><td class="amt">${isNaN(dv) || bad ? calc('') : calc(f2(left))}uL</td></tr>
+          ${rows.map((r, j) => `<tr><td class="nm">・${nm(r)}</td><td>：</td><td class="amt">${field(`${bp}.dry.${dryKey}.${r.k}`, b.dry[dryKey][r.k], f2(r.vol), '3.5em')}uL</td></tr>`).join('')}
+          <tr><td class="nm">・${water}</td><td>：</td><td class="amt">${allIn && !bad ? calc(f2(left)) : calc('')}uL</td></tr>
           <tr class="total"><td class="nm">　Total</td><td>：</td><td class="amt">${esc(fmtNum(g.max))}uL</td></tr></table>
-        ${bad ? `<div class="gib-msg red">乾燥後の液量が ${esc(fmtNum(g.max))} uL を超えています。もう少し乾燥させてください。</div>` : ''}`;
+        ${bad ? `<div class="gib-msg red">乾燥後の合計が ${f2(dsum)} uL で ${esc(fmtNum(g.max))} uL を超えています。もう少し乾燥させてください。</div>` : ''}`;
     }
-    return `<div class="gib-mix"><div>〈${title}〉</div><table class="mat-t">${tr}</table>${warn}${dry}</div>`;
+    return `<div class="gib-mix" data-part="${part}"><div>〈${title}〉</div><table class="mat-t">${tr}</table>${warn}${dry}</div>`;
   };
-  const mixes = `<div class="gib-mixes">${mix('断片（サンプル）', g.rows, 'dry_s')}${b.control !== false ? mix('断片（Control）', g.rows.slice(0, 1), 'dry_c') : ''}</div>`;
-  const mm = b.mm_show !== false ? `<div class="gib-mm">${renderMaterials(b.mm, `${bp}.mm`, ctx)}</div>` : '';
+  const mixes = `<div class="gib-mixes part-row">${mix('断片（サンプル）', g.rows, 's', 'mix_s')}${b.control !== false ? mix('断片（Control）', g.rows.slice(0, 1), 'c', 'mix_c') : ''}</div>`;
+  const mm = b.mm_show !== false ? `<div class="gib-mm" data-part="mm">${renderMaterials(b.mm, `${bp}.mm`, ctx)}</div>` : '';
   return `<div class="gib">${head}${table}${mixes}${mm}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（insert の数・比率・倍量・Master mix など）</summary>${gibEdHtml(b, bp)}</details>` : '');
 }
 function gibEdHtml(b, bp) {
@@ -505,42 +509,107 @@ function renderHeading(b, bp, ctx) {
     default: return `<div class="blk-h" style="${ind}">${t}${ex}</div>`;
   }
 }
+function blockInner(b, i, ctx) {
+  const bp = `blocks.${i}`;
+  switch (b.type) {
+    case 'heading': return renderHeading(b, bp, ctx);
+    case 'text': return renderText(b.text, { ...ctx, path: `${bp}.text` });
+    case 'steps': return renderSteps(b.text, { ...ctx, path: `${bp}.text` });
+    case 'materials': return renderMaterials(b, bp, ctx);
+    case 'table': return renderTable(b, bp, ctx);
+    case 'pcr': return renderPcr(b, bp, ctx);
+    case 'image': return b.src ? `<img class="pic" src="${b.src}" style="width:${(+b.width || 100) * 1.64}mm">` : '';
+    case 'tubes': return renderTubes(b, bp, ctx);
+    case 'pagebreak': return '<div class="pbreak"><span>改ページ（印刷ではここで次のページへ）</span></div>';
+    case 'gel': return renderGel(b, bp, ctx);
+    case 'dilution': return renderDilution(b, bp, ctx);
+    case 'gibson': return renderGibson(b, bp, ctx);
+  }
+  return '';
+}
+// ---------- 印刷の並べ方（レイアウト） ----------
+//   印刷プレビュー・印刷イメージでは、ブロックをさらに細かい「部品」に分けて動かせる（編集画面のブロックは変えない）
+//   doc.layout = [{ id: ブロックのid, part: 部品名, beside: 直前の右に並べる, w: 幅mm }]（動かしたときに作る）
+const BLOCK_PARTS = { gel: ['h', 'recipe', 'mix', 'img'], gibson: ['h', 'table', 'mix_s', 'mix_c', 'mm'], dilution: ['h', 'table'] };
+const PART_BESIDE = { gel: ['mix'], gibson: ['mix_c'] };   // 最初から横に並べておく部品
+const newBlockId = () => 'b' + Math.random().toString(36).slice(2, 10);
+function ensureBlockIds(doc) {
+  const seen = new Set();
+  for (const b of doc.blocks || []) { if (!b.id || seen.has(b.id)) b.id = newBlockId(); seen.add(b.id); }
+}
+function layoutOf(doc) {
+  ensureBlockIds(doc);
+  const P = [];
+  const hasAll = new Set(Array.isArray(doc.layout) ? doc.layout.filter(it => it.part === 'all').map(it => it.id) : []);
+  // 以前に横並び・幅を決めたブロックは、まとめたまま（all）で扱う
+  const partsFor = b => !BLOCK_PARTS[b.type] || hasAll.has(b.id) || (!Array.isArray(doc.layout) && (b.beside || +b.w > 0)) ? ['all'] : BLOCK_PARTS[b.type];
+  (doc.blocks || []).forEach(b => {
+    if (b.print === false) return;
+    partsFor(b).forEach((part, j) => P.push({ id: b.id, part, type: b.type, beside: j === 0 ? !!b.beside : (PART_BESIDE[b.type] || []).includes(part), w: j === 0 && +b.w > 0 && b.type !== 'gel' && b.type !== 'image' ? +b.w : undefined }));
+  });
+  if (!Array.isArray(doc.layout)) return P;
+  const key = it => it.id + ':' + it.part;
+  const want = new Map(P.map(p => [key(p), p]));
+  const L = doc.layout.filter(it => want.has(key(it))).map(it => ({ ...it, type: want.get(key(it)).type }));
+  // 編集画面で増えたブロック（部品）は、編集画面で直前にあるものの後ろに入れる
+  P.forEach((p, k) => {
+    if (L.some(it => key(it) === key(p))) return;
+    let at = 0;
+    for (let j = k - 1; j >= 0; j--) { const ix = L.findIndex(it => key(it) === key(P[j])); if (ix >= 0) { at = ix + 1; break; } }
+    L.splice(at, 0, { ...p, beside: false });
+  });
+  if (L[0]) L[0].beside = false;
+  return L;
+}
+// ブロックの中身を部品ごとに分ける（data-part の付いた要素。入れ子の外側だけ）
+function splitParts(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const parts = {};
+  const els = [...tpl.content.querySelectorAll('[data-part]')].filter(el => !el.parentElement || !el.parentElement.closest('[data-part]'));
+  for (const el of els) parts[el.dataset.part] = el.outerHTML;
+  parts.all = html;
+  return parts;
+}
 function renderDoc(doc, opts = {}) {
   const mode = opts.mode || 'print';
   const ctx = { mode, chem: opts.chem !== false };
   let h = `<div class="sheet${mode === 'fill' ? ' fill' : ''}">`;
   if (opts.date) h += `<div class="date-line">${esc(jpDate(opts.date))}</div>`;
   h += `<h1 class="ptitle">●<u>${inlineFmt(doc.title || '', { ...ctx, path: 'title' })}</u></h1>`;
-  // 横並び（印刷プレビューでドラッグして作る）：beside のブロックは直前のブロックの右に並ぶ。入力画面では縦に並べる
   const groups = [];
-  (doc.blocks || []).forEach((b, i) => {
-    const bp = `blocks.${i}`;
-    const off = b.print === false;
-    if (off && mode !== 'fill') return;   // 「印刷する」のチェックを外したブロックは印刷・印刷イメージに出さない
-    const ind = +b.indent || 0;
-    let inner = '';
-    switch (b.type) {
-      case 'heading': inner = renderHeading(b, bp, ctx); break;
-      case 'text': inner = renderText(b.text, { ...ctx, path: `${bp}.text` }); break;
-      case 'steps': inner = renderSteps(b.text, { ...ctx, path: `${bp}.text` }); break;
-      case 'materials': inner = renderMaterials(b, bp, ctx); break;
-      case 'table': inner = renderTable(b, bp, ctx); break;
-      case 'pcr': inner = renderPcr(b, bp, ctx); break;
-      case 'image': inner = b.src ? `<img class="pic" src="${b.src}" style="width:${(+b.width || 100) * 1.64}mm">` : ''; break;
-      case 'tubes': inner = renderTubes(b, bp, ctx); break;
-      case 'pagebreak': inner = '<div class="pbreak"><span>改ページ（印刷ではここで次のページへ）</span></div>'; break;
-      case 'gel': inner = renderGel(b, bp, ctx); break;
-      case 'dilution': inner = renderDilution(b, bp, ctx); break;
-      case 'gibson': inner = renderGibson(b, bp, ctx); break;
-    }
-    const chk = mode === 'fill' ? `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="${bp}.print" ${off ? '' : 'checked'}></label>` : '';
-    const wst = mode !== 'fill' && +b.w > 0 && b.type !== 'gel' && b.type !== 'image' ? `width:${+b.w}mm;max-width:100%;` : '';   // 右端のドラッグで決めた幅
-    const fsz = +b.fs > 0 && +b.fs !== 100 ? `font-size:${+b.fs}%;` : '';   // ブロックごとの文字の大きさ
-    const html = `<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${wst}${fsz}${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}">${chk}${inner}</div>`;
+  const push = (html, beside, type) => {
     const prev = groups[groups.length - 1];
-    if (mode !== 'fill' && b.beside && prev && b.type !== 'pagebreak' && prev.type !== 'pagebreak') prev.items.push(html);
-    else groups.push({ type: b.type, items: [html] });
-  });
+    if (beside && prev && type !== 'pagebreak' && prev.type !== 'pagebreak') prev.items.push(html);
+    else groups.push({ type, items: [html] });
+  };
+  const styleOf = (b, w) => {
+    const ind = +b.indent || 0;
+    const wst = +w > 0 ? `width:${+w}mm;max-width:100%;` : '';   // 右端のドラッグで決めた幅
+    const fsz = +b.fs > 0 && +b.fs !== 100 ? `font-size:${+b.fs}%;` : '';   // ブロックごとの文字の大きさ
+    return `${wst}${fsz}${b.type !== 'heading' && ind ? `padding-left:${ind}em` : ''}`;
+  };
+  if (mode === 'fill') {
+    // 入力画面：ブロックをそのまま縦に並べる
+    (doc.blocks || []).forEach((b, i) => {
+      const off = b.print === false;
+      const chk = `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="blocks.${i}.print" ${off ? '' : 'checked'}></label>`;
+      push(`<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${styleOf(b)}">${chk}${blockInner(b, i, ctx)}</div>`, false, b.type);
+    });
+  } else {
+    // 印刷・印刷イメージ：部品ごとに、並べ方（レイアウト）の順に置く
+    const L = layoutOf(doc);
+    const idx = new Map((doc.blocks || []).map((b, i) => [b.id, i]));
+    const cache = {};
+    L.forEach((it, li) => {
+      const i = idx.get(it.id);
+      const b = doc.blocks[i];
+      if (!cache[it.id]) cache[it.id] = splitParts(blockInner(b, i, ctx));
+      const html = cache[it.id][it.part];
+      if (!html || !html.trim()) return;
+      push(`<div class="block" data-bi="${i}" data-li="${li}" data-part="${it.part}" style="${styleOf(b, it.w)}">${html}</div>`, it.beside, b.type);
+    });
+  }
   for (const g of groups) h += g.items.length > 1 ? `<div class="block-row">${g.items.join('')}</div>` : g.items[0];
   if (opts.memo && doc.memo && doc.memo.text && doc.memo.text.trim()) {
     h += `<div class="memo"><div class="memo-h">【メモ】</div>${renderText(doc.memo.text, { ...ctx, mode: mode === 'fill' ? 'print' : mode, path: 'memo.text' })}</div>`;
@@ -649,18 +718,6 @@ document.addEventListener('keydown', e => {
   lastField = el;
   wrapSel(...MARKS[k], el);
 });
-// ブロックごとの小さい書式ボタン（そのブロックの欄に書式を付ける）
-function markupBarMini() {
-  return `<div class="mk mk-mini"><span class="muted">書式：</span>
-    <button type="button" data-mk="var" title="可変欄 [[ ]]（Ctrl+Alt+V）">可変欄</button>
-    <button type="button" data-mk="b" title="太字（Ctrl+B）"><b>太</b></button>
-    <button type="button" data-mk="u" title="下線（Ctrl+U）"><u>下線</u></button>
-    <button type="button" data-mk="hl" style="background:#fff200" title="強調(黄)（Ctrl+Alt+H）">黄</button>
-    <button type="button" data-mk="red" style="color:#e00000" title="注意(赤)（Ctrl+Alt+R）">赤</button>
-    <button type="button" data-mk="box" title="枠囲み（Ctrl+Alt+K）"><span style="border:1px solid #333;padding:0 2px">枠</span></button>
-    <button type="button" data-mk="sup" title="上付き（Ctrl+Shift+=）">x<sup>2</sup></button>
-    <button type="button" data-mk="sub" title="下付き（Ctrl+Shift++）">x<sub>2</sub></button></div>`;
-}
 function markupBar() {
   return `<div class="mk"><span class="muted">選んだ文字に書式：</span>
     <button type="button" data-mk="var" title="毎回変わる欄。[[ラベル]] または [[ラベル=既定値]]（Ctrl+Alt+V）">可変欄 [[ ]] <span class="kbd">Ctrl+Alt+V</span></button>
@@ -675,9 +732,6 @@ function markupBar() {
 function bindMarkupBar(root) {
   root.querySelectorAll('[data-mk]').forEach(btn => btn.onmousedown = e => {
     e.preventDefault();
-    // ブロックの中のボタンは、そのブロックの欄に付ける（最後にクリックした欄が別のブロックなら知らせる）
-    const blk = btn.closest('.blk');
-    if (blk && !(lastField && blk.contains(lastField))) { alert('先に、このブロックの中で書式を付けたい文字を選んでください。'); return; }
     wrapSel(...MARKS[btn.dataset.mk]);
   });
 }
@@ -762,19 +816,20 @@ function blockEditorHtml(b, i, n) {
     <button type="button" class="small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
     <button type="button" class="small" data-act="down" data-i="${i}" ${i === n - 1 ? 'disabled' : ''}>↓</button>
     <button type="button" class="small" data-act="dup" data-i="${i}">複製</button>
-    <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${b.type === 'pagebreak' ? '' : markupBarMini()}${body}
+    <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${body}
     <div class="addbar" style="margin:6px 0 0"><span class="muted">この下に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="${i + 1}">${v}</button>`).join('')}</div></div>`;
 }
 function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {}) {
   const render = () => {
     el.innerHTML = `
       ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}
-        よみがな ${inp('kana', doc.kana, '日本語の名前なら自動で入る（英語の名前は自分で入力）', '220px')}
+        よみがな ${inp('kana', doc.kana, '名前を日本語入力で打つと自動で入る（英語は自分で入力）', '240px')}
         フォルダ <select data-bind="folder">${FOLDERS.map(f => `<option ${doc.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(doc.folder) ? '' : '<option value="" selected>未分類</option>'}</select></div></div>` : ''}
       <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div>
         ${withMeta ? `<div class="row" style="margin-top:8px">タグ <span id="pe-tags">${tagBoxHtml(doc.tags || [])}</span></div>
         <div class="muted">同じタグの注意点が、このプロトコルで記録を書くときに自動で表示されます（例：PCR、無菌操作、DMSO）。</div>` : ''}</div>
-      <div class="card">${markupBar()}
+      <div class="card"><div class="mk-sticky">${markupBar()}</div>
+        ${Array.isArray(doc.layout) ? `<div class="layout-note">印刷の並べ方（印刷イメージでのドラッグ・横並び・幅）を変えてあります。ブロックの順番を↑↓で変えても、印刷は変えた並べ方のままです。 <button type="button" class="small" data-act="resetlayout">並べ方をリセット（この編集画面の順にする）</button></div>` : ''}
         <div class="addbar"><span class="muted">先頭に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="0">${v}</button>`).join('')}</div>
         ${doc.blocks.map((b, i) => blockEditorHtml(b, i, doc.blocks.length)).join('')}
       </div>
@@ -784,27 +839,20 @@ function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {})
         ${withMeta ? '<button type="button" class="small" data-act="memo2notes">このメモを「注意点・考え方」に移す</button>' : ''}
         <label><input type="checkbox" data-bind="memo.print" ${(doc.memo || {}).print ? 'checked' : ''}> 最初から「メモも印刷」にしておく</label></div>`;
     bindMarkupBar(el);
+    // 書式ボタンは、下にスクロールしても画面の上（ツールバーのすぐ下）に残す
+    const tb = document.querySelector('.toolbar');
+    el.style.setProperty('--stick-top', (tb ? 46 + tb.offsetHeight : 46) + 'px');
     bindGelDrag(el, doc, () => { render(); onChange(); });
     bindTagBox(el.querySelector('#pe-tags .tagbox'), () => doc.tags || [], t => { doc.tags = t; }, () => { onChange(); if (onTags) onTags(doc.tags); });
+    const nameEl = el.querySelector('input[data-bind="name"]');
+    if (nameEl) bindKanaCapture(nameEl, doc, k => { const ki = el.querySelector('input[data-bind="kana"]'); if (ki) ki.value = k; onChange(); });
   };
   if (!doc.memo) doc.memo = { text: '', print: false };
   render();
-  let kanaT;
-  const fillKana = async () => {
-    if (doc.kana_manual) return;
-    const k = await autoKana(doc.name || '');
-    if (doc.kana_manual) return;
-    doc.kana = k;
-    const ki = el.querySelector('input[data-bind="kana"]');
-    if (ki && document.activeElement !== ki) ki.value = k;
-    onChange();
-  };
-  if (withMeta && !doc.kana && hasJa(doc.name)) fillKana();
   el.oninput = el.onchange = e => {
     const t = e.target;
     if (!t.dataset.bind) return;
     applyBind(doc, t);
-    if (t.dataset.bind === 'name' && e.type === 'input') { clearTimeout(kanaT); kanaT = setTimeout(fillKana, 400); }
     if (t.dataset.bind === 'kana' && e.type === 'input') doc.kana_manual = !!t.value.trim();   // 自分で直したら自動で上書きしない（空にすると自動に戻る）
     if (t.dataset.live) { refreshGelPreview(el, doc, t); bindGelDrag(el, doc, () => { render(); onChange(); }); }
     if (e.type === 'change' && (t.tagName === 'SELECT' || t.dataset.resize || t.dataset.live || t.dataset.rerender)) render();
@@ -820,8 +868,9 @@ function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {})
     if (a === 'add') B.splice(+t.dataset.at, 0, newBlock(t.dataset.type));
     else if (a === 'up' && i > 0) [B[i - 1], B[i]] = [B[i], B[i - 1]];
     else if (a === 'down' && i < B.length - 1) [B[i + 1], B[i]] = [B[i], B[i + 1]];
-    else if (a === 'dup') B.splice(i + 1, 0, clone(B[i]));
+    else if (a === 'dup') { const c = clone(B[i]); c.id = newBlockId(); B.splice(i + 1, 0, c); }
     else if (a === 'del') { if (!confirm('このブロックを削除しますか？')) return; B.splice(i, 1); }
+    else if (a === 'resetlayout') { delete doc.layout; B.forEach(b => { delete b.beside; delete b.w; }); }
     else if (a === 'unbeside') delete B[i].beside;
     else if (a === 'unw') delete B[i].w;
     else if (a === 'rowadd') getPath(doc, t.dataset.path).push({ name: '', kind: 'calc', per1: '', unit: 'uL', note: '' });
@@ -1374,7 +1423,7 @@ function gelRecipeHtml(b, bp, ctx) {
     }
     return `<tr><td class="nm">・${inlineFmt(r.name, sub)}</td><td>：</td><td class="amt">${a}${esc(r.unit || '')}</td><td>${ref}</td></tr>`;
   }).join('');
-  return `<div class="gel-mix gel-recipe"><div>〈${title}〉</div><table class="mat-t">${tr}</table></div>`;
+  return `<div class="gel-mix gel-recipe" data-part="recipe"><div>〈${title}〉</div><table class="mat-t">${tr}</table></div>`;
 }
 const DEFAULT_GEL_MIX = [{ name: 'DNA', amt: '1uL' }, { name: '6×LD', amt: '2uL' }, { name: '1/10TE', amt: '9uL' }];
 function gelMixHtml(b, ctx) {
@@ -1391,13 +1440,13 @@ function gelMixHtml(b, ctx) {
   }
   const rows = mix.map(m => `<tr><td class="nm">・${inlineFmt(m.name, sub)}</td><td>：</td><td class="amt">${inlineFmt(m.amt, sub)}</td></tr>`).join('');
   const tot = total !== null && mix.length > 1 ? `<tr class="total"><td class="nm">　合計</td><td>：</td><td class="amt">${fmtNum(total)}${esc(unit)}</td></tr>` : '';
-  return `<div class="gel-mix">${b.mix_label !== '' ? `<div>〈${inlineFmt(b.mix_label ?? '泳動サンプル（1レーンあたり）', sub)}〉</div>` : ''}<table class="mat-t">${rows}${tot}</table></div>`;
+  return `<div class="gel-mix" data-part="mix">${b.mix_label !== '' ? `<div>〈${inlineFmt(b.mix_label ?? '泳動サンプル（1レーンあたり）', sub)}〉</div>` : ''}<table class="mat-t">${rows}${tot}</table></div>`;
 }
 function renderGel(b, bp, ctx) {
   const recipes = gelRecipeHtml(b, bp, ctx) + gelMixHtml(b, ctx);
-  const head = (b.label ? `<div class="blk-h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】${b.note ? `<span class="extra">${inlineFmt(b.note, { ...ctx, mode: 'print' })}</span>` : ''}</div>` : '') + (recipes ? `<div class="gel-recipes">${recipes}</div>` : '');
+  const head = (b.label ? `<div class="blk-h" data-part="h">【${inlineFmt(b.label, { ...ctx, mode: 'print' })}】${b.note ? `<span class="extra">${inlineFmt(b.note, { ...ctx, mode: 'print' })}</span>` : ''}</div>` : '') + (recipes ? `<div class="gel-recipes part-row">${recipes}</div>` : '');
   if (!b.src) {
-    const ph = `<div class="gel-empty">（泳動画像なし）</div>`;
+    const ph = `<div class="gel-empty" data-part="img">（泳動画像なし）</div>`;
     return head + ph + (ctx.mode === 'fill' ? `<details class="fig-ed no-print" open><summary>この図を編集（画像・レーン名など）</summary>${gelEdHtml(b, bp)}</details>` : '');
   }
   const pc = v => Math.max(40, Math.min(250, num(v) || 100)) / 100;   // 文字の大きさ（%）
@@ -1434,7 +1483,7 @@ function renderGel(b, bp, ctx) {
     }).join('');
     return `${cap((b.grp_caps || {})[lv])}<div class="g-main g-grprow" style="font-size:${pc(b.grp_fs)}em">${items}</div>`;
   }).join('');
-  const html = `<div class="gel" style="width:${(b.width || 80) * 1.64}mm">${head}
+  const html = `${head}<div class="gel" data-part="img" style="width:${(b.width || 80) * 1.64}mm">
     <div class="g-grid">
       ${grpRows}
       ${names ? `${cap(b.cap_names)}<div class="g-main">${names}</div>` : ''}
@@ -2005,7 +2054,7 @@ function collectUnits(sheet) {
     if (el.matches('h1.ptitle')) { units.push({ html: el.outerHTML, glue: true }); continue; }
     if (el.classList.contains('block')) {
       if (el.querySelector(':scope > .pbreak')) { units.push({ brk: true }); continue; }
-      if (el.querySelector(':scope > .blk-h, :scope > .h-sub')) { units.push({ html: el.outerHTML, glue: true }); continue; }
+      if (el.querySelector(':scope > .blk-h, :scope > .h-sub') || el.dataset.part === 'h') { units.push({ html: el.outerHTML, glue: true }); continue; }
       const kids = [...el.children];
       if (kids.length && kids.every(k => k.classList.contains('keep') || k.classList.contains('gap'))) {
         const o = wrapOpen(el), c = wrapClose(el);
@@ -2208,20 +2257,22 @@ function protocolOptions(ps) {
 }
 function loadFolderOpen() { try { return JSON.parse(localStorage.getItem('jn_folders_closed') || '[]'); } catch (e) { return []; } }
 function saveFolderOpen(closed) { try { localStorage.setItem('jn_folders_closed', JSON.stringify(closed)); } catch (e) { /* 保存できなくても使える */ } }
-// ---------- よみがな（日本語の名前から自動で作る。辞書 kuromoji を同梱） ----------
-let kuroP = null;
-function getKuro() {
-  if (!kuroP) kuroP = loadScript('/vendor/kuromoji/kuromoji.js').then(() => new Promise((ok, ng) => kuromoji.builder({ dicPath: '/vendor/kuromoji/dict/' }).build((e, t) => e ? ng(e) : ok(t))));
-  return kuroP;
-}
-const hasJa = t => /[\u3040-\u30ff\u3400-\u9fff々〆ヵヶ]/.test(String(t || ''));
+// ---------- よみがな：名前を日本語入力（IME）で打ったときの「変換前のひらがな」をそのまま使う ----------
 const toHira = t => String(t).replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
-async function autoKana(name) {
-  if (!hasJa(name)) return '';   // 英語などの名前は自分で入れる
-  try {
-    const tk = await getKuro();
-    return toHira(tk.tokenize(String(name)).map(k => (k.reading && k.reading !== '*') ? k.reading : k.surface_form).join('')).replace(/\s+/g, '');
-  } catch (e) { return ''; }
+const isKanaOnly = t => /^[ぁ-ゖァ-ヺー・\s]+$/.test(t || '');
+function bindKanaCapture(nameEl, doc, onKana) {
+  let comp = '';
+  nameEl.addEventListener('compositionstart', () => { comp = ''; });
+  nameEl.addEventListener('compositionupdate', e => { if (isKanaOnly(e.data)) comp = e.data; });   // 変換する前のひらがなを覚えておく
+  nameEl.addEventListener('compositionend', e => {
+    if (doc.kana_manual) return;
+    const piece = comp || (isKanaOnly(e.data) ? e.data : '');
+    if (piece) { doc.kana = toHira((doc.kana || '') + piece).replace(/\s+/g, ''); onKana(doc.kana); }
+    comp = '';
+  });
+  nameEl.addEventListener('input', () => {
+    if (!doc.kana_manual && !nameEl.value.trim()) { doc.kana = ''; onKana(''); }   // 名前を消したら読みも消す
+  });
 }
 // プロトコルの並べ替え（PCごとに覚える）
 const PSORTS = {
@@ -2241,10 +2292,6 @@ const normQ = t => String(t || '').normalize('NFKC').toLowerCase().replace(/[ァ
 async function viewProtocols() {
   const all = await api.get('protocols');
   const sortKey = loadPSort();
-  if (sortKey === 'name' || protoQuery.trim()) {
-    // よみがなが未入力の日本語の名前は、その場で読みを作って並べる（保存は編集画面で）
-    for (const p of all) if (!p.kana && hasJa(p.name)) p.kana = await autoKana(p.name);
-  }
   const q = normQ(protoQuery.trim());
   let ps = q ? all.filter(p => q.split(/\s+/).every(w => normQ(p.name).includes(w) || normQ(p.kana).includes(w) || normQ(p.folder).includes(w))) : all.slice();
   if (PSORTS[sortKey][1]) ps.sort(PSORTS[sortKey][1]);
@@ -2345,7 +2392,7 @@ async function viewNewRecord(pid) {
   const pd = p.data;
   const rec = {
     protocol_id: p.id, protocol_name: pd.name, exp_date: today(), tags: clone(pd.tags || []),
-    doc: { title: pd.title, blocks: clone(pd.blocks), memo: clone(pd.memo || { text: '', print: false }) },
+    doc: { title: pd.title, blocks: clone(pd.blocks), memo: clone(pd.memo || { text: '', print: false }), ...(pd.layout ? { layout: clone(pd.layout) } : {}) },
     opts: { chem: true, memo: !!(pd.memo && pd.memo.print), date: true, cut: true },
   };
   recordEditor(rec, null, null);
@@ -2530,7 +2577,7 @@ async function measureNatural(doc, opts) {
   document.body.appendChild(box);
   await waitAssets(box);
   const w = {};
-  box.querySelectorAll('[data-bi]').forEach(el => { w[el.dataset.bi] = el.offsetWidth / PX_MM; });
+  box.querySelectorAll('[data-li]').forEach(el => { w[el.dataset.li] = el.offsetWidth / PX_MM; });
   box.remove();
   return w;
 }
@@ -2546,9 +2593,12 @@ function bindPreviewDrag(root, getDoc, getOpts, onChange) {
   let nat = {}, drag = null;
   const tip = document.createElement('div');
   tip.className = 'drag-tip no-print';
-  const blockEl = t => { const el = t && t.closest && t.closest('[data-bi]'); return el && root.contains(el) ? el : null; };
+  const blockEl = t => { const el = t && t.closest && t.closest('[data-li]'); return el && root.contains(el) ? el : null; };
+  // 並べ方（部品の並び）を書き換えるときは、書面に持たせる
+  const items = () => { const d = getDoc(); if (!Array.isArray(d.layout)) { d.layout = layoutOf(d); d.blocks.forEach(b => { delete b.beside; delete b.w; }); } return d.layout; };
+  const blockOf = it => getDoc().blocks.find(b => b.id === it.id);
   const clear = () => root.querySelectorAll('.drop-top,.drop-bottom,.drop-left,.drop-right,.drop-bad').forEach(e => e.classList.remove('drop-top', 'drop-bottom', 'drop-left', 'drop-right', 'drop-bad'));
-  const sameBlock = i => root.querySelectorAll(`[data-bi="${i}"]`);
+  const sameBlock = i => root.querySelectorAll(`[data-li="${i}"]`);
   const nearRight = (el, x) => { const r = el.getBoundingClientRect(); return x > r.right - RESIZE_EDGE && x < r.right + 3; };
   const showTip = (e, text, bad) => {
     const zf = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
@@ -2560,9 +2610,9 @@ function bindPreviewDrag(root, getDoc, getOpts, onChange) {
   const zoneAt = (x, y) => {
     const el = blockEl(document.elementFromPoint(x, y));
     if (!el) return null;
-    const ti = +el.dataset.bi;
+    const ti = +el.dataset.li;
     if (ti === drag.i) return null;
-    const B = getDoc().blocks;
+    const B = layoutOf(getDoc());
     const r = el.getBoundingClientRect();
     const fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;
     const contentFrac = Math.min(1, (nat[ti] || ROW_W) / (el.offsetWidth / PX_MM || ROW_W));
@@ -2591,12 +2641,13 @@ function bindPreviewDrag(root, getDoc, getOpts, onChange) {
     const el = blockEl(e.target);
     if (!el || e.target.closest('input,select,textarea,button,a,summary')) return;
     e.preventDefault();
-    const i = +el.dataset.bi;
-    const B = getDoc().blocks;
-    if (nearRight(el, e.clientX) && B[i].type !== 'pagebreak') {
-      // 大きさを変える：画像・泳動画像は表示の幅（%）、それ以外はブロックの幅（mm）
+    const i = +el.dataset.li;
+    const it = layoutOf(getDoc())[i];
+    if (!it) return;
+    if (nearRight(el, e.clientX) && it.type !== 'pagebreak') {
+      // 大きさを変える：画像・泳動画像は表示の幅（%）、それ以外は部品の幅（mm）
       const r = el.getBoundingClientRect();
-      const target = B[i].type === 'gel' ? el.querySelector('.gel') : B[i].type === 'image' ? el.querySelector('img.pic') : el;
+      const target = it.type === 'gel' && it.part === 'img' ? el.querySelector('.gel') : it.type === 'image' ? el.querySelector('img.pic') : el;
       if (!target) return;
       const scale = target.offsetWidth / target.getBoundingClientRect().width;   // 画面の px → 書面の px
       drag = { mode: 'resize', i, el, target, x0: e.clientX, w0: target.offsetWidth, scale, r };
@@ -2637,22 +2688,21 @@ function bindPreviewDrag(root, getDoc, getOpts, onChange) {
     if (!drag) return;
     const d = drag; drag = null;
     clear(); tip.remove(); root.querySelectorAll('.dragging').forEach(x => x.classList.remove('dragging'));
-    const B = getDoc().blocks;
     if (d.mode === 'resize') {
       if (!d.mm) return;
-      const b = B[d.i];
-      if (b.type === 'gel' || b.type === 'image') b.width = Math.round(d.mm / 1.64);
-      else b.w = d.mm;
+      const L = items(), it = L[d.i], b = blockOf(it);
+      if ((it.type === 'gel' && it.part === 'img') || it.type === 'image') b.width = Math.round(d.mm / 1.64);
+      else it.w = d.mm;
       onChange('resize');
       return;
     }
-    if (d.on && d.z && d.z.ok) { moveBlock(B, d.i, d.z.ti, d.z.zone); onChange('move'); }
+    if (d.on && d.z && d.z.ok) { moveBlock(items(), d.i, d.z.ti, d.z.zone); onChange('move'); }
   };
   root.addEventListener('dblclick', e => {
     const el = blockEl(e.target);
     if (!el || !nearRight(el, e.clientX)) return;
-    const b = getDoc().blocks[+el.dataset.bi];
-    if (b.type === 'gel') b.width = 80; else if (b.type === 'image') b.width = 100; else delete b.w;
+    const L = items(), it = L[+el.dataset.li], b = blockOf(it);
+    if (it.type === 'gel' && it.part === 'img') b.width = 80; else if (it.type === 'image') b.width = 100; else delete it.w;
     onChange('resize');
   });
   // 画面を開き直しても、前の画面の分が残らないように付け替える
@@ -2671,7 +2721,7 @@ async function viewPrint(id) {
   const rec = r.data;
   $app.innerHTML = `<div class="toolbar no-print"><div class="row"><h2 style="margin:0">印刷プレビュー</h2><span class="muted">${esc(rec.protocol_name)}　記録 No.${id}</span><span class="spacer"></span>
       <span class="colorsel">色 <label><input type="radio" name="pcolor" value="color" ${rec.opts.mono ? '' : 'checked'}> カラー</label><label><input type="radio" name="pcolor" value="mono" ${rec.opts.mono ? 'checked' : ''}> 白黒向け</label></span>
-      <button id="undo" disabled>元に戻す</button> <button id="unrow">横並びをすべて解除</button>
+      <button id="undo" disabled>元に戻す</button> <button id="unrow" title="ドラッグで変えた並び・横並び・幅をすべて元に戻す">並べ方をリセット</button>
       <a class="btn" href="#/record/${id}">← 入力に戻る</a> <button class="primary big" id="pr">印刷する</button></div>
       <div class="muted" style="margin-top:6px">ブロックをドラッグすると動かせます：ほかのブロックの<b>右側の空き</b>に落とすと横に並び（幅が入るときだけ）、<b>上半分・下半分</b>に落とすとその上・下へ移ります。ブロックの<b>右端</b>をドラッグすると幅（画像は大きさ）を変えられます（右端をダブルクリックで元に戻す）。並べ方はこの記録に保存されます。<br>
       印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。切りたい場所を変えたいときは「改ページ」ブロックを入れてください。</div></div>
@@ -2681,15 +2731,16 @@ async function viewPrint(id) {
   const opts = () => ({ mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false, cut: !!rec.opts.cut });
   const undo = [];   // 動かす前の並び
   const undoBtn = document.getElementById('undo');
-  let before = clone(rec.doc.blocks);
+  const snap = () => clone({ blocks: rec.doc.blocks, layout: rec.doc.layout });
+  let before = snap();
   bindPreviewDrag(pagesEl, () => rec.doc, opts, async () => { undo.push(before); await saveAndDraw(); });
   const draw = async () => {
     const y = window.scrollY;
     pagesEl.innerHTML = await paginateHtml(rec.doc, opts());
-    before = clone(rec.doc.blocks);
+    before = snap();
     window.scrollTo(0, y);
     undoBtn.disabled = !undo.length;
-    document.getElementById('unrow').disabled = !rec.doc.blocks.some(b => b.beside);
+    document.getElementById('unrow').disabled = !rec.doc.layout && !rec.doc.blocks.some(b => b.beside || b.w);
   };
   const saveAndDraw = async () => {
     const u = await putWithCheck('records/' + id, rec, r.updated);
@@ -2697,8 +2748,8 @@ async function viewPrint(id) {
     r.updated = u;
     await draw();
   };
-  undoBtn.onclick = async () => { if (!undo.length) return; rec.doc.blocks = undo.pop(); await saveAndDraw(); toast('元に戻しました'); };
-  document.getElementById('unrow').onclick = async () => { undo.push(clone(rec.doc.blocks)); rec.doc.blocks.forEach(b => delete b.beside); await saveAndDraw(); toast('横並びを解除しました'); };
+  undoBtn.onclick = async () => { if (!undo.length) return; const u = undo.pop(); rec.doc.blocks = u.blocks; if (u.layout) rec.doc.layout = u.layout; else delete rec.doc.layout; await saveAndDraw(); toast('元に戻しました'); };
+  document.getElementById('unrow').onclick = async () => { undo.push(snap()); delete rec.doc.layout; rec.doc.blocks.forEach(b => { delete b.beside; delete b.w; }); await saveAndDraw(); toast('並べ方を元に戻しました（編集画面の順・横並びなし）'); };
   // 色：カラーで印刷するときは印刷画面の設定を案内。白黒向けは、黄色の強調を灰色・赤字を太字＋下線にする
   const colorHelp = () => {
     document.getElementById('colorhelp').innerHTML = rec.opts.mono

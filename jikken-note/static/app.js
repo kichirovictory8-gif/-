@@ -158,7 +158,7 @@ function lineHtml(text, ind, ctx, extraCls = '') {
   const hang = HANG.test(text);
   return `<div class="ln${hang ? ' hang' : ''} ${extraCls}" style="padding-left:${ind + (hang ? 1 : 0)}em">${inlineFmt(text, ctx)}</div>`;
 }
-function renderText(str, ctx) {
+function renderText(str, ctx, link) {
   // 行頭から始まる行と、その下の字下げした行をひとまとまりにして、ページの途中で切れないようにする
   let out = '', unit = '';
   const flush = () => { if (unit) out += `<div class="keep">${unit}</div>`; unit = ''; };
@@ -169,11 +169,16 @@ function renderText(str, ctx) {
     unit += lineHtml(text, ind, ctx);
   }
   flush();
+  // 前後の「操作手順」をつなぐ矢印が、この文章（補足）の左を通る
+  if (link) return `<div class="flow link keep">${link.head ? ARROW_HTML : ARROW_LINE_HTML}<div class="link-body">${out}</div>${link.head ? '<div class="flow-end short"></div>' : ''}</div>`;
   return out;
 }
 // ステップ間の下向き矢印（線と矢じりを同じ中心線にそろえる）
 const ARROW_HTML = '<div class="flow-arrow"><div class="fa-line"></div><svg class="fa-head" viewBox="0 0 10 8" preserveAspectRatio="none"><polygon points="0,0 10,0 5,8" fill="#000"/></svg></div>';
-function renderSteps(str, ctx) {
+const ARROW_LINE_HTML = '<div class="flow-arrow noh"><div class="fa-line"></div></div>';   // 矢じりなし（次のブロックへ続く）
+// かっこでくくる：「((」の行から「))」の行まで。「)) ×3回」のように後ろに書いた文字は、かっこの右に出る
+const BR_OPEN = /^[(（]{2}$/, BR_CLOSE = /^[)）]{2}\s*(.*)$/;
+function renderSteps(str, ctx, linkOut) {
   // 1行1ステップ。字下げした行・※で始まる行は補足。
   // ステップの間には下向きの矢印を自動で入れる。補足があるときは、矢印が補足の横を通って長くなる。
   // 空行で区切ると矢印は入らない。
@@ -182,33 +187,48 @@ function renderSteps(str, ctx) {
   const isNote = (ind, text) => ind > 0 || /^[※＊*]/.test(String(text).replace(/\*\*|__|==|!!/g, ''));
   const rows = String(str || '').split('\n').map(splitIndent).filter(r => !/^[↓⇓]$/.test(r.text.trim()));
   const groups = [[]];
+  let pendOpen = false;
   rows.forEach((r, i) => {
     const g = groups[groups.length - 1];
-    if (r.text.trim() === '') {
-      const next = rows.slice(i + 1).find(x => x.text.trim() !== '');
+    const t = r.text.trim();
+    if (BR_OPEN.test(t)) { pendOpen = true; return; }
+    const cm = t.match(BR_CLOSE);
+    if (cm) { const last = g[g.length - 1]; if (last) { last.close = true; last.label = cm[1]; } return; }
+    if (t === '') {
+      const next = rows.slice(i + 1).find(x => x.text.trim() !== '' && !BR_OPEN.test(x.text.trim()) && !BR_CLOSE.test(x.text.trim()));
       if (g.length && next && isNote(next.ind, next.text)) g[g.length - 1].notes.push({ blank: true });
       else if (g.length) groups.push([]);
       return;
     }
-    if (!isNote(r.ind, r.text)) g.push({ step: r.text, notes: [] });
+    if (!isNote(r.ind, r.text)) { g.push({ step: r.text, notes: [], open: pendOpen }); pendOpen = false; }
     else if (g.length) g[g.length - 1].notes.push({ ind: r.ind, text: r.text });
-    else g.push({ step: null, notes: [{ ind: r.ind, text: r.text }] });
+    else { g.push({ step: null, notes: [{ ind: r.ind, text: r.text }], open: pendOpen }); pendOpen = false; }
   });
   const noteHtml = (n, minInd) => n.blank ? '<div class="gap"></div>' : lineHtml(n.text, Math.max(n.ind, minInd), ctx);
   const parts = [];
+  const lastG = groups.filter(g => g.length).pop();
   for (const g of groups) {
     if (!g.length) continue;
-    let h = '';
+    let h = '', br = null;
     g.forEach((st, i) => {
       // 項目・補足・次への矢印をひとまとまりにして、ページの途中で切れないようにする
       let u = st.step !== null ? lineHtml(st.step, 0, ctx) : '';
       const next = g[i + 1];
-      if (st.step !== null && next && next.step !== null) {
-        u += `<div class="flow">${ARROW_HTML}${st.notes.map(n => noteHtml(n, 1.2)).join('')}<div class="flow-end"></div></div>`;
+      const out = !next && g === lastG && linkOut && st.step !== null;   // 次の「操作手順」ブロックへ矢印でつなぐ
+      if (st.step !== null && ((next && next.step !== null) || out)) {
+        u += `<div class="flow">${out ? ARROW_LINE_HTML : ARROW_HTML}${st.notes.map(n => noteHtml(n, 1.2)).join('')}<div class="flow-end${out ? ' short' : ''}"></div></div>`;
       } else {
         u += st.notes.map(n => noteHtml(n, 0)).join('');
       }
-      h += `<div class="stepunit keep">${u}</div>`;
+      const unit = `<div class="stepunit${br ? '' : ' keep'}">${u}</div>`;
+      if (st.open && !br) br = { html: '' };
+      if (br) {
+        br.html += unit;
+        if (st.close || i === g.length - 1) {
+          h += `<div class="br-wrap keep"><div class="br-body">${br.html}</div><div class="brk"></div>${st.label ? `<div class="br-lbl">${inlineFmt(st.label, ctx)}</div>` : ''}</div>`;
+          br = null;
+        }
+      } else h += unit;
     });
     parts.push(h);
   }
@@ -509,12 +529,12 @@ function renderHeading(b, bp, ctx) {
     default: return `<div class="blk-h" style="${ind}">${t}${ex}</div>`;
   }
 }
-function blockInner(b, i, ctx) {
+function blockInner(b, i, ctx, link = {}) {
   const bp = `blocks.${i}`;
   switch (b.type) {
     case 'heading': return renderHeading(b, bp, ctx);
-    case 'text': return renderText(b.text, { ...ctx, path: `${bp}.text` });
-    case 'steps': return renderSteps(b.text, { ...ctx, path: `${bp}.text` });
+    case 'text': return renderText(b.text, { ...ctx, path: `${bp}.text` }, link.mid ? { head: link.head } : null);
+    case 'steps': return renderSteps(b.text, { ...ctx, path: `${bp}.text` }, link.out);
     case 'materials': return renderMaterials(b, bp, ctx);
     case 'table': return renderTable(b, bp, ctx);
     case 'pcr': return renderPcr(b, bp, ctx);
@@ -561,6 +581,23 @@ function layoutOf(doc) {
   if (L[0]) L[0].beside = false;
   return L;
 }
+// 「操作手順」→「文章」→「操作手順」のとき、文章を補足として、前後の操作手順を矢印でつなぐ
+//   seq: [{ type, b, beside }]（並んでいる順）→ 各位置の { out, mid, head }
+function stepLinks(seq) {
+  const L = seq.map(() => ({}));
+  seq.forEach((x, k) => {
+    if (x.type !== 'steps' || x.b.link_prev === false || x.beside) return;
+    const mids = [];
+    let j = k - 1;
+    while (j >= 0 && seq[j].type === 'text' && !seq[j].beside) { mids.push(j); j--; }
+    if (!mids.length || j < 0 || seq[j].type !== 'steps') return;
+    if (seq[j + 1] && seq[j + 1].beside) return;
+    L[j].out = true;
+    mids.forEach(m => { L[m].mid = true; });
+    L[mids[0]].head = true;   // いちばん下の文章の最後に矢じり
+  });
+  return L;
+}
 // ブロックの中身を部品ごとに分ける（data-part の付いた要素。入れ子の外側だけ）
 function splitParts(html) {
   const tpl = document.createElement('template');
@@ -591,20 +628,26 @@ function renderDoc(doc, opts = {}) {
   };
   if (mode === 'fill') {
     // 入力画面：ブロックをそのまま縦に並べる
+    const on = (doc.blocks || []).map((b, i) => ({ b, i, type: b.type })).filter(x => x.b.print !== false);
+    const lk = stepLinks(on), lkOf = {};
+    on.forEach((x, k) => { lkOf[x.i] = lk[k]; });
     (doc.blocks || []).forEach((b, i) => {
       const off = b.print === false;
       const chk = `<label class="pchk no-print" title="チェックを外すと、このブロックは印刷されません"><input type="checkbox" data-bind="blocks.${i}.print" ${off ? '' : 'checked'}></label>`;
-      push(`<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${styleOf(b)}">${chk}${blockInner(b, i, ctx)}</div>`, false, b.type);
+      push(`<div class="block${off ? ' off' : ''}" data-bi="${i}" style="${styleOf(b)}">${chk}${blockInner(b, i, ctx, lkOf[i] || {})}</div>`, false, b.type);
     });
   } else {
     // 印刷・印刷イメージ：部品ごとに、並べ方（レイアウト）の順に置く
     const L = layoutOf(doc);
     const idx = new Map((doc.blocks || []).map((b, i) => [b.id, i]));
     const cache = {};
+    const lk = stepLinks(L.map(it => ({ type: it.part === 'all' ? it.type : 'part', b: doc.blocks[idx.get(it.id)], beside: it.beside })));
     L.forEach((it, li) => {
       const i = idx.get(it.id);
       const b = doc.blocks[i];
-      if (!cache[it.id]) cache[it.id] = splitParts(blockInner(b, i, ctx));
+      const key = it.id + (lk[li].out || lk[li].mid ? ':' + JSON.stringify(lk[li]) : '');
+      if (!cache[key]) cache[key] = splitParts(blockInner(b, i, ctx, lk[li]));
+      cache[it.id] = cache[key];
       const html = cache[it.id][it.part];
       if (!html || !html.trim()) return;
       push(`<div class="block" data-bi="${i}" data-li="${li}" data-part="${it.part}" style="${styleOf(b, it.w)}">${html}</div>`, it.beside, b.type);
@@ -727,9 +770,150 @@ function markupBar() {
     <button type="button" data-mk="red" style="color:#e00000" title="Ctrl+Alt+R">注意(赤) <span class="kbd">Ctrl+Alt+R</span></button>
     <button type="button" data-mk="box" title="Ctrl+Alt+K">枠囲み <span class="kbd">Ctrl+Alt+K</span></button>
     <button type="button" data-mk="sup" title="Ctrl+Shift+=">上付き x<sup>2</sup> <span class="kbd">Ctrl+Shift+=</span></button>
-    <button type="button" data-mk="sub" title="Ctrl+Shift++">下付き x<sub>2</sub> <span class="kbd">Ctrl+Shift++</span></button></div>`;
+    <button type="button" data-mk="sub" title="Ctrl+Shift++">下付き x<sub>2</sub> <span class="kbd">Ctrl+Shift++</span></button></div>
+    <div class="mk"><span class="muted">選んだ行（複数行OK）：</span>
+    <button type="button" data-lo="in" title="Tab">字下げ → <span class="kbd">Tab</span></button>
+    <button type="button" data-lo="out" title="Shift+Tab">← 字下げを戻す <span class="kbd">Shift+Tab</span></button>
+    <span class="lo-w">字下げの幅 <input type="number" class="lo-n" min="0" max="20" step="0.5" value="2" style="width:56px"> 文字に <button type="button" data-lo="set">そろえる</button></span>
+    <button type="button" data-acw="1" title="英数字を打ったときに出る候補（例：v → vortex）">予測変換の単語</button>
+    <button type="button" data-lo="br" title="操作手順の数行を右側のかっこでくくる。かっこの右に文字を書くときは「))」の後ろに書く（例：)) ×3回）">かっこでくくる ]</button></div>`;
 }
+// ---------- 予測変換（「v」→ vortex / vortex & flushing など。全角で打ってもよい） ----------
+//   単語は全員で共有（「予測変換の単語」ボタンで追加・削除）
+const AC_DEFAULT = ['vortex', 'vortex & flushing', 'spin down', 'pipetting & flushing', 'stMilliQ'];
+let acWords = null;
+async function loadAcWords() {
+  if (acWords) return acWords;
+  try { const r = await quietGet('settings/autocomplete'); acWords = Array.isArray(r.value) ? r.value : AC_DEFAULT.slice(); }
+  catch (e) { acWords = AC_DEFAULT.slice(); }
+  return acWords;
+}
+const acNorm = t => String(t || '').normalize('NFKC').toLowerCase();
+const acPop = document.createElement('div');
+acPop.className = 'ac-pop no-print';
+let ac = null;   // { el, start, end, list, sel }
+function acClose() { ac = null; acPop.remove(); }
+function caretXY(el, pos) {
+  const cs = getComputedStyle(el), d = document.createElement('div');
+  for (const k of ['boxSizing', 'width', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'textIndent', 'tabSize', 'wordBreak', 'overflowWrap']) d.style[k] = cs[k];
+  d.style.cssText += ';position:absolute;visibility:hidden;top:0;left:-9999px;border-style:solid;white-space:' + (el.tagName === 'TEXTAREA' ? 'pre-wrap' : 'pre');
+  d.textContent = el.value.slice(0, pos);
+  const sp = document.createElement('span'); sp.textContent = '​'; d.appendChild(sp);
+  document.body.appendChild(d);
+  const r = el.getBoundingClientRect(), dr = d.getBoundingClientRect(), sr = sp.getBoundingClientRect();
+  d.remove();
+  return { x: r.left + (sr.left - dr.left) - el.scrollLeft, y: r.top + (sr.bottom - dr.top) - el.scrollTop };
+}
+async function acUpdate(el, typed) {
+  const words = await loadAcWords();
+  const v = el.value, pos = el.selectionStart;
+  if (pos !== el.selectionEnd) return acClose();
+  let start, tok;
+  if (typed != null) { tok = typed; start = pos; }   // 日本語入力の途中（まだ確定していない文字）
+  else {
+    const m = v.slice(0, pos).match(/[A-Za-z0-9&＆\-ａ-ｚＡ-Ｚ０-９]+$/);
+    if (!m) return acClose();
+    tok = m[0]; start = pos - tok.length;
+  }
+  const t = acNorm(tok);
+  const list = t ? words.filter(w => acNorm(w).startsWith(t) && acNorm(w) !== t).slice(0, 8) : [];
+  if (!list.length) return acClose();
+  ac = { el, start, end: pos, list, sel: 0, composing: typed != null };
+  const zf = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+  const xy = caretXY(el, pos);
+  acPop.innerHTML = list.map((w, k) => `<div class="ac-item${k === 0 ? ' on' : ''}" data-k="${k}">${esc(w)}</div>`).join('') + '<div class="ac-hint">↑↓で選ぶ・Enter/Tabで決定・Escで閉じる</div>';
+  acPop.style.left = xy.x / zf + 'px'; acPop.style.top = (xy.y + 2) / zf + 'px';
+  if (!acPop.parentNode) document.body.appendChild(acPop);
+}
+function acAccept(k) {
+  if (!ac) return;
+  const { el, list } = ac;
+  const w = list[k];
+  if (ac.composing) el.blur();   // 日本語入力の途中なら、いったん確定させてから置き換える
+  const v = el.value;
+  // 置き換える範囲：カーソルの前の英数字（全角を含む）
+  const pos = ac.composing ? (el.selectionStart || v.length) : ac.end;
+  const m = v.slice(0, pos).match(/[A-Za-z0-9&＆\-ａ-ｚＡ-Ｚ０-９]+$/);
+  const st = m ? pos - m[0].length : pos;
+  el.value = v.slice(0, st) + w + v.slice(pos);
+  el.focus();
+  el.selectionStart = el.selectionEnd = st + w.length;
+  acClose();
+  acMute = true;   // 決めた直後は候補を出し直さない
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  acMute = false;
+}
+let acMute = false;
+const AC_FIELDS = '.blk textarea, .blk input[type=text], .meta input[type=text], .meta textarea';
+document.addEventListener('input', e => { if (acMute) return; if (e.target.matches && e.target.matches(AC_FIELDS) && !e.isComposing) acUpdate(e.target); else if (ac && e.target === ac.el && !e.isComposing) acClose(); });
+document.addEventListener('compositionupdate', e => { if (e.target.matches && e.target.matches(AC_FIELDS)) { if (/^[a-zA-Zａ-ｚＡ-Ｚ]+$/.test(e.data || '')) acUpdate(e.target, e.data); else acClose(); } });
+document.addEventListener('compositionend', e => { if (e.target.matches && e.target.matches(AC_FIELDS)) setTimeout(() => acUpdate(e.target), 0); });
+document.addEventListener('keydown', e => {
+  if (!ac || e.target !== ac.el || e.isComposing) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { ac.sel = (ac.sel + (e.key === 'ArrowDown' ? 1 : ac.list.length - 1)) % ac.list.length; acPop.querySelectorAll('.ac-item').forEach((x, k) => x.classList.toggle('on', k === ac.sel)); }
+  else if (e.key === 'Enter' || e.key === 'Tab') acAccept(ac.sel);
+  else if (e.key === 'Escape') acClose();
+  else return;
+  e.preventDefault(); e.stopImmediatePropagation();
+}, true);
+acPop.addEventListener('mousedown', e => { const it = e.target.closest('.ac-item'); if (it) { e.preventDefault(); acAccept(+it.dataset.k); } });
+document.addEventListener('focusout', e => { if (ac && e.target === ac.el) setTimeout(() => { if (ac && document.activeElement !== ac.el) acClose(); }, 150); });
+async function openAcWords() {
+  const words = (await loadAcWords()).slice();
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal"><h3 style="margin-top:0">予測変換の単語</h3>
+    <p class="muted">英数字を打つと、その文字で始まる単語が候補に出ます（全角で打ってもOK）。1行に1つ。全員で共有されます。</p>
+    <textarea id="acw" rows="12" style="font-family:var(--ui)">${esc(words.join('\n'))}</textarea>
+    <div class="row" style="margin-top:10px"><button data-reset>初期値に戻す</button><span class="spacer"></span><button data-x>閉じる</button><button class="primary" data-ok>保存</button></div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('[data-x]').onclick = () => bg.remove();
+  bg.querySelector('[data-reset]').onclick = () => { bg.querySelector('#acw').value = AC_DEFAULT.join('\n'); };
+  bg.querySelector('[data-ok]').onclick = async () => {
+    const list = [...new Set(bg.querySelector('#acw').value.split('\n').map(x => x.trim()).filter(Boolean))];
+    await api.send('POST', 'settings/autocomplete', { value: list });
+    acWords = list; bg.remove(); toast('予測変換の単語を保存しました');
+  };
+}
+// 選んだ行（カーソルのある行を含む）をまとめて書き換える
+function lineOp(kind, el = lastField, n) {
+  if (!el || el.tagName !== 'TEXTAREA') { alert('先に、操作手順や文章の欄で行を選んでください。'); return; }
+  const v = el.value;
+  const s0 = el.selectionStart, e0 = el.selectionEnd;
+  const a = v.lastIndexOf('\n', s0 - 1) + 1;
+  let z = v.indexOf('\n', e0 > s0 && v[e0 - 1] === '\n' ? e0 - 1 : e0);
+  if (z < 0) z = v.length;
+  let lines = v.slice(a, z).split('\n');
+  const lead = l => l.match(/^[ 　\t]*/)[0];
+  if (kind === 'in') lines = lines.map(l => l.trim() ? '　' + l : l);
+  else if (kind === 'out') lines = lines.map(l => l.replace(/^(　|\t| {1,2})/, ''));
+  else if (kind === 'set') {
+    const w = Math.max(0, Math.min(20, num(n) || 0));
+    const pre = '　'.repeat(Math.floor(w)) + (w % 1 ? ' ' : '');
+    lines = lines.map(l => l.trim() ? pre + l.slice(lead(l).length) : l);
+  } else if (kind === 'br') lines = ['((', ...lines, '))'];
+  const txt = lines.join('\n');
+  el.value = v.slice(0, a) + txt + v.slice(z);
+  if (kind === 'br') { el.selectionStart = el.selectionEnd = a + txt.length; }   // 「))」の後ろにカーソル（かっこの右の文字を続けて書ける）
+  else { el.selectionStart = a; el.selectionEnd = a + txt.length; }
+  el.focus();
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// 操作手順・文章の欄では Tab で字下げ、Shift+Tab で戻す（選んだ行をまとめて）
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.isComposing) return;
+  const el = e.target;
+  if (!el.matches || !el.matches('.blk textarea')) return;
+  e.preventDefault();
+  lineOp(e.shiftKey ? 'out' : 'in', el);
+});
 function bindMarkupBar(root) {
+  root.querySelectorAll('[data-acw]').forEach(btn => btn.onclick = () => openAcWords());
+  root.querySelectorAll('[data-lo]').forEach(btn => btn.onmousedown = e => {
+    e.preventDefault();
+    const nIn = btn.closest('.mk') && btn.closest('.mk').querySelector('.lo-n');
+    lineOp(btn.dataset.lo, lastField, nIn ? nIn.value : 0);
+  });
   root.querySelectorAll('[data-mk]').forEach(btn => btn.onmousedown = e => {
     e.preventDefault();
     wrapSel(...MARKS[btn.dataset.mk]);
@@ -750,8 +934,9 @@ function blockEditorHtml(b, i, n) {
         字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
       break;
     case 'steps':
-      body = `<div class="muted">1行に1ステップ。ステップの間には下向きの矢印が自動で入ります。行頭にスペース（半角・全角どちらでも）がある行と「※」で始まる行は補足になり、矢印は補足（間の空行も含む）を飛び越えて次の行頭から始まる行まで続きます。空行のすぐ後に行頭から始まる行を書くと、そこには矢印が入りません。</div>${ta(bp + '.text', b.text, 6)}
-        <div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;
+      body = `<div class="muted">1行に1ステップ。ステップの間には下向きの矢印が自動で入ります。行頭にスペース（半角・全角どちらでも）がある行と「※」で始まる行は補足になり、矢印は補足（間の空行も含む）を飛び越えて次の行頭から始まる行まで続きます。空行のすぐ後に行頭から始まる行を書くと、そこには矢印が入りません。数行をかっこでくくるときは、行を選んで上の「かっこでくくる」（「((」と「))」の行で囲む。「)) ×3回」のように後ろに書いた文字はかっこの右に出る）。</div>${ta(bp + '.text', b.text, 6)}
+        <div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}
+        <label title="「操作手順」→「文章」→「操作手順」の順のとき、間の文章を補足として、前の操作手順の最後からこのブロックの最初まで矢印でつなぐ"><input type="checkbox" data-bind="${bp}.link_prev" ${b.link_prev !== false ? 'checked' : ''}> 前の操作手順から矢印でつなぐ（間の「文章」を補足にする）</label></div>`;
       break;
     case 'text':
       body = `${ta(bp + '.text', b.text, 4)}<div class="row"><button type="button" class="small" data-act="taigen" data-i="${i}">体言止めの提案</button> 字下げ ${inp(bp + '.indent', b.indent, '0', '40px')}</div>`;

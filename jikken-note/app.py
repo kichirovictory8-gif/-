@@ -162,6 +162,11 @@ def init_db():
             created TEXT NOT NULL,
             updated TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated TEXT NOT NULL
+        );
         """
     )
     seed_protocols = []
@@ -402,6 +407,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(out)
                 r = con.execute("SELECT * FROM records WHERE id=?", (int(p[2]),)).fetchone()
                 return self.send_json(row_record(r)) if r else self.send_json({"error": "not found"}, 404)
+            if p[1] == "settings" and len(p) == 3:
+                # 全員で共有する設定（予測変換の単語など）
+                r = con.execute("SELECT value FROM settings WHERE key=?", (p[2],)).fetchone()
+                return self.send_json({"value": json.loads(r["value"]) if r else None})
             if p[1] == "notes":
                 if len(p) == 2:
                     rows = con.execute("SELECT * FROM notes ORDER BY id DESC").fetchall()
@@ -473,6 +482,11 @@ class Handler(BaseHTTPRequestHandler):
                         changed += 1
                 con.commit()
                 return self.send_json({"ok": True, "changed": changed})
+            if p[1] == "settings" and len(p) == 3:
+                con.execute("INSERT INTO settings(key, value, updated) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                            (p[2], json.dumps(body.get("value"), ensure_ascii=False), now()))
+                con.commit()
+                return self.send_json({"ok": True})
             if p[1:] == ["ocr"]:
                 # 画像（スクリーンショット）の文字を読む。Windows の文字認識が使えなければ、ブラウザ側で読む
                 res = windows_ocr(base64.b64decode(body.get("data", "")))

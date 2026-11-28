@@ -369,3 +369,19 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .sheet .gib-mixes { flex-wrap: nowrap; }
 .sheet .gib-mixes > .gib-mix { flex: 1 1 0; min-width: 0; }
 .sheet .gib-mix table.mat-t td.nm { white-space: normal; }
+/* 操作手順をブロックをまたいでつなぐ矢印 */
+.sheet .flow-arrow.noh { bottom: 0; }
+.sheet .flow-arrow.noh .fa-line { bottom: 0; }
+.sheet .flow.link > .flow-arrow { top: 0; }
+.sheet .flow.link .link-body { padding-left: 1.2em; }
+.sheet .flow-end.short { height: 0.6em; }
+/* かっこでくくる（操作手順の数行） */
+.sheet .br-wrap { display: flex; align-items: stretch; }
+.sheet .br-body { flex: 0 1 auto; min-width: 0; }
+.sheet .br-wrap .brk { flex: none; width: 3mm; border: 0.8pt solid #000; border-left: none; margin: 0.3em 0 0.3em 3mm; }
+.sheet .br-lbl { align-self: center; white-space: nowrap; padding-left: 2mm; }
+/* 予測変換 */
+.ac-pop { position: fixed; z-index: 80; background: #fff; border: 1px solid #9aa7b4; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.18); min-width: 180px; padding: 3px 0; font-size: 14px; }
+.ac-item { padding: 4px 12px; cursor: pointer; white-space: nowrap; }
+.ac-item.on, .ac-item:hover { background: #e3f0ff; }
+.ac-hint { font-size: 11px; color: #888; padding: 3px 12px 2px; border-top: 1px solid #eee; margin-top: 2px; }

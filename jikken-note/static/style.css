@@ -384,3 +384,4 @@ select.small-sel { padding: 2px 4px; font-size: 13px; }
 .ac-item.on, .ac-item:hover { background: #e3f0ff; }
 .ac-hint { font-size: 11px; color: #888; padding: 3px 12px 2px; border-top: 1px solid #eee; margin-top: 2px; }
 .sheet .flow.link, .sheet .flow.link .link-body { display: flow-root; }
+.sheet .nbr.box { border-color: #000; border-radius: 0.5em; }

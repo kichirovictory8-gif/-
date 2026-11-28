@@ -160,20 +160,20 @@ function lineHtml(text, ind, ctx, extraCls = '') {
 }
 function renderText(str, ctx, link) {
   // 行頭から始まる行と、その下の字下げした行をひとまとまりにして、ページの途中で切れないようにする
-  let out = '', unit = '', br = null;
+  let out = '', unit = '', br = null, brk = 'paren';
   const flush = () => { if (unit) out += `<div class="keep">${unit}</div>`; unit = ''; };
   for (const l of String(str || '').split('\n')) {
     const { ind, text } = splitIndent(l);
     const t = text.trim();
     // 「((」〜「))」の間は、まとめてかっこでくくる
-    if (BR_OPEN.test(t)) { br = []; continue; }
-    if (BR_CLOSE.test(t)) { if (br) unit += notesHtml([{ open: true }, ...br, { close: true }], 0, ctx); br = null; continue; }
+    if (BR_OPEN.test(t)) { br = []; brk = brKind(t); continue; }
+    if (BR_CLOSE.test(t)) { if (br) unit += notesHtml([{ open: true, kind: brk }, ...br, { close: true }], 0, ctx); br = null; continue; }
     if (br) { br.push(text === '' ? { blank: true } : { ind, text }); continue; }
     if (text === '') { flush(); out += '<div class="gap"></div>'; continue; }
     if (ind === 0) flush();
     unit += lineHtml(text, ind, ctx);
   }
-  if (br) unit += notesHtml([{ open: true }, ...br, { close: true }], 0, ctx);
+  if (br) unit += notesHtml([{ open: true, kind: brk }, ...br, { close: true }], 0, ctx);
   flush();
   // 前後の「操作手順」をつなぐ矢印が、この文章（補足）の左を通る
   if (link) return `<div class="flow link keep">${link.head ? ARROW_HTML : ARROW_LINE_HTML}<div class="link-body">${out}</div>${link.head ? '<div class="flow-end short"></div>' : ''}</div>`;
@@ -182,24 +182,25 @@ function renderText(str, ctx, link) {
 // ステップ間の下向き矢印（線と矢じりを同じ中心線にそろえる）
 const ARROW_HTML = '<div class="flow-arrow"><div class="fa-line"></div><svg class="fa-head" viewBox="0 0 10 8" preserveAspectRatio="none"><polygon points="0,0 10,0 5,8" fill="#000"/></svg></div>';
 const ARROW_LINE_HTML = '<div class="flow-arrow noh"><div class="fa-line"></div></div>';   // 矢じりなし（次のブロックへ続く）
-// 補足をまとめてかっこでくくる：「((」の行から「))」の行まで（角の丸いかっこで囲む）
-const BR_OPEN = /^[(（]{2}$/, BR_CLOSE = /^[)）]{2}\s*(.*)$/;
+// 補足をまとめてくくる：「((」〜「))」の行＝角の丸いかっこ、「{{」〜「}}」の行＝角の丸い枠
+const BR_OPEN = /^(?:[(（]{2}|[{｛]{2})$/, BR_CLOSE = /^(?:[)）]{2}|[}｝]{2})\s*(.*)$/;
+const brKind = t => /^[{｛]/.test(t) ? 'box' : 'paren';
 // 補足の行の並び（{ind,text} / {blank} / {open} / {close}）→ HTML
 function notesHtml(notes, minInd, ctx) {
-  let h = '', buf = null;
+  let h = '', buf = null, kind = 'paren';
   const one = n => n.blank ? '<div class="gap"></div>' : lineHtml(n.text, Math.max(n.ind, minInd), ctx);
   for (const n of notes) {
-    if (n.open) { buf = []; continue; }
+    if (n.open) { buf = []; kind = n.kind || 'paren'; continue; }
     if (n.close) {
       if (buf && buf.length) {
         const base = Math.min(...buf.filter(x => !x.blank).map(x => Math.max(x.ind, minInd)));
-        h += `<div class="nbr" style="margin-left:${base}em">${buf.map(x => x.blank ? '<div class="gap"></div>' : lineHtml(x.text, Math.max(x.ind, minInd) - base, ctx)).join('')}</div>`;
+        h += `<div class="nbr${kind === 'box' ? ' box' : ''}" style="margin-left:${base}em">${buf.map(x => x.blank ? '<div class="gap"></div>' : lineHtml(x.text, Math.max(x.ind, minInd) - base, ctx)).join('')}</div>`;
       }
       buf = null; continue;
     }
     if (buf) buf.push(n); else h += one(n);
   }
-  if (buf && buf.length) h += notesHtml([{ open: true }, ...buf, { close: true }], minInd, ctx);   // 「))」を書き忘れたとき
+  if (buf && buf.length) h += notesHtml([{ open: true, kind }, ...buf, { close: true }], minInd, ctx);   // 「))」を書き忘れたとき
   return h;
 }
 function renderSteps(str, ctx, linkOut, lead) {
@@ -217,7 +218,7 @@ function renderSteps(str, ctx, linkOut, lead) {
   rows.forEach((r, i) => {
     const g = groups[groups.length - 1];
     const t = r.text.trim();
-    if (BR_OPEN.test(t)) { inBr = true; addNote(g, { open: true }); return; }
+    if (BR_OPEN.test(t)) { inBr = true; addNote(g, { open: true, kind: brKind(t) }); return; }
     if (BR_CLOSE.test(t)) { if (inBr) addNote(g, { close: true }); inBr = false; return; }
     if (t === '') {
       if (inBr) { addNote(g, { blank: true }); return; }
@@ -806,7 +807,8 @@ function markupBar() {
     <button type="button" data-lo="out" title="Shift+Tab">← 字下げを戻す <span class="kbd">Shift+Tab</span></button>
     <span class="lo-w">字下げの幅 <input type="number" class="lo-n" min="0" max="20" step="0.5" value="2" style="width:56px"> 文字に <button type="button" data-lo="set">そろえる</button></span>
     <button type="button" data-acw="1" title="英数字を打ったときに出る候補（例：v → vortex）">予測変換の単語</button>
-    <button type="button" data-lo="br" title="選んだ補足の行を、まとめて角の丸いかっこでくくる（「((」と「))」の行で囲む）">まとめてかっこ （ ）</button></div>`;
+    <button type="button" data-lo="br" title="選んだ補足の行を、まとめて角の丸いかっこでくくる（「((」と「))」の行で囲む）">まとめてかっこ （ ）</button>
+    <button type="button" data-lo="box" title="選んだ補足の行を、まとめて角の丸い枠で囲む（「{{」と「}}」の行で囲む）">まとめて枠で囲む ▢</button></div>`;
 }
 // ---------- 予測変換（「v」→ vortex / vortex & flushing など。全角で打ってもよい） ----------
 //   単語は全員で共有（「予測変換の単語」ボタンで追加・削除）
@@ -922,9 +924,10 @@ function lineOp(kind, el = lastField, n) {
     const pre = '　'.repeat(Math.floor(w)) + (w % 1 ? ' ' : '');
     lines = lines.map(l => l.trim() ? pre + l.slice(lead(l).length) : l);
   } else if (kind === 'br') lines = ['((', ...lines, '))'];
+  else if (kind === 'box') lines = ['{{', ...lines, '}}'];
   const txt = lines.join('\n');
   el.value = v.slice(0, a) + txt + v.slice(z);
-  if (kind === 'br') { el.selectionStart = el.selectionEnd = a + txt.length; }   // 「))」の後ろにカーソル（かっこの右の文字を続けて書ける）
+  if (kind === 'br' || kind === 'box') { el.selectionStart = el.selectionEnd = a + txt.length; }   // 「))」の後ろにカーソル（かっこの右の文字を続けて書ける）
   else { el.selectionStart = a; el.selectionEnd = a + txt.length; }
   el.focus();
   el.dispatchEvent(new Event('input', { bubbles: true }));

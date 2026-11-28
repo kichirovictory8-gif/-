@@ -133,21 +133,18 @@ def draft(qid: str, style: str = "qa") -> dict:
             "notes": notes, "style": style, "question": x}
 
 
-def coverage(conn: sqlite3.Connection, subject: str = "") -> dict:
-    """出題テーマ別のカバー率。
+def card_themes(conn: sqlite3.Connection) -> dict[int, set[tuple[str, str]]]:
+    """カード id → そのカードが属する出題テーマ（科目, テーマ）の集合。
 
-    カードがそのテーマに属するとみなす条件（同じ科目のカードのみ）:
-      系統 = テーマ名 / タグ = テーマ名 / そのテーマの過去問から作った（source）
+    条件（同じ科目のカードのみ）: 系統 = テーマ名 / タグ = テーマ名 / そのテーマの過去問から作った（source）
     """
-    ths = themes(subject)
+    names = {(t["subject"], t["theme"]) for t in themes()}
     qtheme = {x["id"]: (x["subject"], x["theme"]) for x in _load()}
-    cards = conn.execute("SELECT id, subject, unit, source FROM cards").fetchall()
     tags: dict[int, set[str]] = {}
     for r in conn.execute("SELECT card_id, tag FROM card_tags"):
         tags.setdefault(r[0], set()).add(r[1])
-    count: dict[tuple[str, str], int] = {}
-    names = {(t["subject"], t["theme"]) for t in ths}
-    for c in cards:
+    out: dict[int, set[tuple[str, str]]] = {}
+    for c in conn.execute("SELECT id, subject, unit, source FROM cards"):
         keys = set()
         if (c["subject"], c["unit"]) in names:
             keys.add((c["subject"], c["unit"]))
@@ -159,6 +156,20 @@ def coverage(conn: sqlite3.Connection, subject: str = "") -> dict:
             k = qtheme[src[len(SOURCE_PREFIX):]]
             if k[0] == c["subject"]:
                 keys.add(k)
+        if keys:
+            out[c["id"]] = keys
+    return out
+
+
+def coverage(conn: sqlite3.Connection, subject: str = "") -> dict:
+    """出題テーマ別のカバー率。
+
+    カードがそのテーマに属するとみなす条件（同じ科目のカードのみ）:
+      系統 = テーマ名 / タグ = テーマ名 / そのテーマの過去問から作った（source）
+    """
+    ths = themes(subject)
+    count: dict[tuple[str, str], int] = {}
+    for keys in card_themes(conn).values():
         for k in keys:
             count[k] = count.get(k, 0) + 1
     rows = [{**t, "cards": count.get((t["subject"], t["theme"]), 0)} for t in ths]

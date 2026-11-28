@@ -13,7 +13,7 @@ from . import cloze, srs
 from .subjects import SUBJECTS, check_subject
 from .tags import normalize_tags
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -47,6 +47,25 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, id);
 CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(review_date);
+CREATE TABLE IF NOT EXISTS generated (       -- 自動生成のカード（追加するか破棄するかを選ぶまで pending）
+    id           INTEGER PRIMARY KEY,
+    fact_key     TEXT    NOT NULL UNIQUE,      -- 材料の知識（同じ知識からは二度作らない）
+    kind         TEXT    NOT NULL,             -- past_q / past_rev / past_stmt / note
+    subject      TEXT    NOT NULL,
+    unit         TEXT    NOT NULL DEFAULT '',  -- 出題テーマ
+    front        TEXT    NOT NULL,
+    back         TEXT    NOT NULL DEFAULT '',
+    text         TEXT    NOT NULL DEFAULT '',  -- 穴を開ける前の文
+    spans        TEXT    NOT NULL DEFAULT '[]',-- 選んだ穴と特徴（作り方の学習に使う）
+    status       TEXT    NOT NULL DEFAULT 'pending',   -- pending / added / discarded
+    reason       TEXT,                         -- 破棄の理由 easy / position / wrong / duplicate
+    trigger      TEXT    NOT NULL DEFAULT 'manual',
+    card_id      INTEGER,
+    created_at   TEXT    NOT NULL,
+    created_date TEXT    NOT NULL,
+    decided_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_generated_status ON generated(status);
 CREATE TABLE IF NOT EXISTS memos (
     id         INTEGER PRIMARY KEY,
     text       TEXT    NOT NULL,
@@ -122,7 +141,12 @@ reps AS (
 """
 
 
+_IS_NEW = ("(c.stage = 0 AND NOT EXISTS (SELECT 1 FROM reviews r0 WHERE r0.card_id = c.id"
+           " AND r0.practice_session IS NULL))")
+_SUBJECT_ORDER = "CASE c.subject " + " ".join(f"WHEN '{s}' THEN {i}" for i, s in enumerate(SUBJECTS)) + " ELSE 99 END"
 ORDERS = {
+    # 復習（一度でも解いたカード）を先に科目をまたいで混ぜて出し、新規はテーマ（科目・系統）ごとにまとめて出す
+    "grouped": f"{_IS_NEW}, CASE WHEN {_IS_NEW} THEN 0 ELSE random() END, {_SUBJECT_ORDER}, c.unit, c.id",
     "due": "c.due, c.id",          # 期日が古い順
     "random": "random()",          # ランダム
     "added": "c.id",               # 追加した順（古い → 新しい）
@@ -341,6 +365,84 @@ class Store:
         self.conn.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
         self.conn.commit()
 
+    # ---- 自動生成 ----
+    def list_generated(self, status: str = "pending") -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM generated WHERE status = ? ORDER BY id DESC", (status,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.pop("spans", None)
+            d["question_html"] = cloze.render_front(d["front"])
+            d["back_html"] = cloze.render_back(d["back"])
+            out.append(d)
+        return out
+
+    def _pending(self, gen_id: int) -> sqlite3.Row:
+        row = self.conn.execute("SELECT * FROM generated WHERE id = ?", (gen_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"自動生成のカードが見つかりません: {gen_id}")
+        if row["status"] != "pending":
+            raise ValueError("このカードはすでに追加または破棄されています")
+        return row
+
+    def add_generated(self, gen_id: int, subject=None, unit=None, front=None, back=None, masks=None, tags=None,
+                      split: bool = False) -> list[int]:
+        """自動生成のカードを追加する（直した内容があればそれで）。split=True なら穴ごとに分けて追加。"""
+        from . import gen
+        row = self._pending(gen_id)
+        subject = subject or row["subject"]
+        unit = row["unit"] if unit is None else unit
+        front = row["front"] if front is None else front
+        back = row["back"] if back is None else back
+        tags = normalize_tags(tags) if tags is not None else [gen.GEN_TAG]
+        source = "gen:" + row["fact_key"]
+        if split:
+            ids = self.split_add(subject, unit, front, back, masks, tags, source)
+        else:
+            ids = [self.add_card(subject, unit, front, back, masks, tags, source)]
+        gen.mark_kept_spans(self.conn, gen_id, front)
+        self.conn.execute("UPDATE generated SET status = 'added', card_id = ?, decided_at = ? WHERE id = ?",
+                          (ids[0], _iso(self.now()), gen_id))
+        self.conn.commit()
+        return ids
+
+    def discard_generated(self, gen_id: int, reason: str | None = None) -> None:
+        from . import gen
+        self._pending(gen_id)
+        if reason and reason not in gen.REASONS:
+            raise ValueError(f"破棄の理由が正しくありません: {reason}")
+        self.conn.execute("UPDATE generated SET status = 'discarded', reason = ?, decided_at = ? WHERE id = ?",
+                          (reason or None, _iso(self.now()), gen_id))
+        self.conn.commit()
+
+    # ---- 1枚に詰め込みすぎたカードを穴ごとに分ける ----
+    def split_add(self, subject, unit, front, back, masks=None, tags=None, source: str = "") -> list[int]:
+        parts = cloze.split_units(front, cloze.normalize_masks(masks, front))
+        if len(parts) < 2:
+            raise ValueError("分けられる穴が2つ以上ありません")
+        ids = []
+        try:
+            for f, m in parts:
+                ids.append(self._add_no_commit(subject, unit, f, back, m))
+                self._set_tags(ids[-1], normalize_tags(tags))
+                if source:
+                    self.conn.execute("UPDATE cards SET source = ? WHERE id = ?", (str(source)[:100], ids[-1]))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return ids
+
+    # ---- ✖ のときの一言メモ（裏面に足す） ----
+    def append_note(self, card_id: int, text: str) -> dict:
+        card = self._require(card_id)
+        text = _clean_text(text, "メモ", True)[:500]
+        stamp = self.today()
+        back = (card["back"] + "\n\n" if card["back"] else "") + f"💡 {stamp.month}/{stamp.day} ✖のメモ：{text}"
+        self.conn.execute("UPDATE cards SET back = ?, updated_at = ? WHERE id = ?", (back, _iso(self.now()), card_id))
+        self.conn.commit()
+        return self.get_card(card_id)
+
     def all_tags(self) -> list[dict]:
         """使われているタグと枚数（多い順）。"""
         rows = self.conn.execute(
@@ -407,7 +509,7 @@ class Store:
         d["interval"] = srs.interval_for(d["stage"])
         d["front_plain"] = cloze.plain(d["front"])
         d["back_plain"] = cloze.plain(d["back"])
-        d["question_html"] = cloze.render_front(d["front"], d["masks"])
+        d["question_html"] = cloze.render_front(d["front"], d["masks"], stage=d["stage"])
         d["back_html"] = cloze.render_back(d["back"])
         d["is_cloze"] = cloze.has_cloze(d["front"], d["masks"])
         imgs = cloze.image_ids(d["front"]) or cloze.image_ids(d["back"])

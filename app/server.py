@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, past, shortcut, srs, stats, storage  # noqa: E402
+from flashcards import APP_ID, VERSION, cloze, db, gen, io_json, lan, past, shortcut, srs, stats, storage  # noqa: E402
 from flashcards.bulk import parse_bulk  # noqa: E402
 from flashcards.subjects import SUBJECTS  # noqa: E402
 
@@ -214,6 +214,9 @@ class Handler(BaseHTTPRequestHandler):
                 "can_shortcut": sys.platform == "win32" and self._is_local(),
                 "past_available": past.available(), "flag_tag": db.FLAG_TAG,
                 "leech_tag": db.LEECH_TAG, "leech_threshold": db.LEECH_THRESHOLD,
+                "gen_reasons": gen.REASONS, "gen_kinds": gen.KIND_LABELS, "gen_tag": gen.GEN_TAG,
+                "gen_daily_limit": gen.DAILY_LIMIT, "gen_pending_limit": gen.PENDING_LIMIT,
+                "hint_fade_days": cloze.HINT_FADE_DAYS, "overload_holes": gen.MAX_HOLES + 1,
             }
             if app.lan and self._is_local():
                 meta["passcode"] = app.auth.passcode
@@ -231,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
             for key, tag in (("flagged", db.FLAG_TAG), ("leech", db.LEECH_TAG)):
                 d[key] = conn.execute("SELECT COUNT(*) FROM card_tags WHERE tag = ?", (tag,)).fetchone()[0]
             return self._json(d)
+
+        if parts[0] == "generated":
+            return self._generated(method, parts[1:], q, body)
 
         if parts[0] == "memos":
             if method == "GET" and len(parts) == 1:
@@ -352,6 +358,28 @@ class Handler(BaseHTTPRequestHandler):
                   "HttpOnly; SameSite=Strict")
         return self._json({"ok": True}, 200, {"Set-Cookie": cookie})
 
+    def _generated(self, method: str, rest: list[str], q: dict, body: dict):
+        st, conn = self.app.store, self.app.conn
+        if method == "GET" and not rest:
+            return self._json(st.list_generated(q.get("status", "pending") or "pending"))
+        if method == "GET" and rest == ["count"]:
+            return self._json({"pending": gen.pending_count(conn)})
+        if method == "GET" and rest == ["style"]:
+            return self._json({"style": gen.Style(conn).summary(), "weak": gen.weak_themes(conn, st.today())[:8]})
+        if method == "POST" and rest == ["run"]:
+            trigger = str(body.get("trigger", "manual"))
+            if trigger not in ("daily", "session", "manual"):
+                raise ApiError(400, "trigger が正しくありません")
+            return self._json(gen.run(conn, st.now(), st.today(), trigger))
+        if method == "POST" and len(rest) == 2 and rest[1] == "add":
+            ids = st.add_generated(_int(rest[0]), body.get("subject"), body.get("unit"), body.get("front"),
+                                   body.get("back"), body.get("masks"), body.get("tags"), bool(body.get("split")))
+            return self._json({"card_ids": ids, "pending": gen.pending_count(conn)})
+        if method == "POST" and len(rest) == 2 and rest[1] == "discard":
+            st.discard_generated(_int(rest[0]), body.get("reason") or None)
+            return self._json({"pending": gen.pending_count(conn)})
+        raise ApiError(404, "見つかりません")
+
     def _images(self, method: str, rest: list[str], body: dict):
         st = self.app.store
         if not rest and method == "POST":
@@ -381,6 +409,12 @@ class Handler(BaseHTTPRequestHandler):
                                       body.get("front", ""), body.get("back", ""), body.get("masks"),
                                       body.get("tags"), str(body.get("source") or ""))
                 return self._json(st.get_card(card_id), 201)
+        if rest == ["split"] and method == "POST":   # 穴ごとに分けて追加（replace_id があれば元のカードを消す）
+            ids = st.split_add(body.get("subject", ""), body.get("unit", ""), body.get("front", ""),
+                               body.get("back", ""), body.get("masks"), body.get("tags"), str(body.get("source") or ""))
+            if body.get("replace_id"):
+                st.delete_card(_int(body["replace_id"]))
+            return self._json({"card_ids": ids}, 201)
         if rest == ["bulk"] and method == "POST":
             parsed = parse_bulk(str(body.get("text", "")))
             preview = {
@@ -410,6 +444,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 st.delete_card(card_id)
                 return self._json({"deleted": card_id})
+        if rest[1:] == ["note"] and method == "POST":
+            return self._json(st.append_note(card_id, str(body.get("text", ""))))
         if rest[1:] == ["flag"] and method == "POST":
             return self._json({"tags": st.set_flag(card_id, bool(body.get("on")))})
         if rest[1:] == ["reset"] and method == "POST":

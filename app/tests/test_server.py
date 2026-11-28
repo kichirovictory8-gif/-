@@ -148,6 +148,34 @@ class ServerTest(unittest.TestCase):
         s, _ = self.call("GET", "/api/past/draft?id=104-2&style=bad")
         self.assertEqual(s, 400)
 
+    def test_generated_api(self):
+        from urllib.parse import quote
+        s, c = self.call("POST", "/api/cards", {"subject": "薬理", "unit": "自律神経作用薬", "front": "演習", "back": "x"})
+        s, _ = self.call("POST", "/api/review", {"card_id": c["id"], "rating": "again"})
+        s, r = self.call("POST", "/api/generated/run", {"trigger": "manual"})
+        self.assertGreater(r["created"], 0)
+        s, cnt = self.call("GET", "/api/generated/count")
+        self.assertEqual(cnt["pending"], r["pending"])
+        s, items = self.call("GET", "/api/generated")
+        self.assertIn('class="cl"', items[0]["question_html"])
+        s, a = self.call("POST", f"/api/generated/{items[0]['id']}/add", {"front": items[0]["front"], "tags": "自動生成 頻出"})
+        self.assertEqual(len(a["card_ids"]), 1)
+        s, _ = self.call("POST", f"/api/generated/{items[1]['id']}/discard", {"reason": "easy"})
+        self.assertEqual(s, 200)
+        s, _ = self.call("POST", f"/api/generated/{items[1]['id']}/discard", {"reason": "easy"})
+        self.assertEqual(s, 400)
+        s, st = self.call("GET", "/api/generated/style")
+        self.assertIn("alpha", st["style"])
+        self.assertTrue(st["weak"])
+        s, sp = self.call("POST", "/api/cards/split", {"subject": "薬理", "front": "{{c1::A}}{{c1::B}}", "back": "b"})
+        self.assertEqual((s, len(sp["card_ids"])), (201, 2))
+        s, n = self.call("POST", f"/api/cards/{c['id']}/note", {"text": "取り違え"})
+        self.assertIn("取り違え", n["back"])
+        s, _ = self.call("GET", "/api/session/next?order=grouped")
+        self.assertEqual(s, 200)
+        s, _ = self.call("POST", "/api/generated/run", {"trigger": "bad"})
+        self.assertEqual(s, 400)
+
     def test_csrf_and_host(self):
         s, _ = self.call("POST", "/api/cards", {"subject": "薬理", "front": "a", "back": "b"},
                          headers={"X-Yakushi-Flash": ""})

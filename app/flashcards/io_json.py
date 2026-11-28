@@ -20,7 +20,8 @@
 "counted": false は「学習状況のリセット前の評価」（履歴としては残るが集計に数えない）。
 "practice_session" は練習（全カード）での評価（間隔・集計に影響しない）。
 "source" は過去問から作ったカードの出どころ、"leech_after_reviews" は「要見直し」を外した時点までの
-そのカードの評価の数（以降の ✖ を数え直す）。"memos" はメモ箱。これらとtags / practice_session は省略可。
+そのカードの評価の数（以降の ✖ を数え直す）。"memos" はメモ箱、"generated" は自動生成のカード
+（未処理・追加・破棄の記録。作り方の学習にも使う）。これらとtags / practice_session は省略可。
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ from .subjects import check_subject
 from .tags import normalize_tags
 
 FORMAT_VERSION = 2
+GEN_FIELDS = ("fact_key", "kind", "subject", "unit", "front", "back", "text", "spans", "status", "reason",
+              "trigger", "created_at", "created_date", "decided_at")
 READABLE_VERSIONS = (1, 2)
 MODES = ("append", "replace")
 
@@ -95,8 +98,9 @@ def export_data(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             "reviews": reviews_by_card.get(c["id"], []),
         })
     memos = [dict(m) for m in conn.execute("SELECT text, subject, created_at FROM memos ORDER BY id")]
-    return {"format": APP_ID, "version": FORMAT_VERSION,
-            "exported_at": now.isoformat(timespec="seconds"), "images": images, "cards": cards, "memos": memos}
+    generated = [{k: g[k] for k in GEN_FIELDS} for g in conn.execute("SELECT * FROM generated ORDER BY id")]
+    return {"format": APP_ID, "version": FORMAT_VERSION, "exported_at": now.isoformat(timespec="seconds"),
+            "images": images, "cards": cards, "memos": memos, "generated": generated}
 
 
 def _check_date(value, name: str, idx: int) -> str:
@@ -129,6 +133,26 @@ def _session(value, idx: int):
     if not isinstance(value, str) or not SESSION_RE.match(value):
         raise ValueError(f"{idx + 1}枚目: practice_session が正しくありません")
     return value
+
+
+def _validate_generated(data) -> list[dict]:
+    out = []
+    for i, g in enumerate(data.get("generated") or []):
+        if not isinstance(g, dict) or not g.get("fact_key") or g.get("status") not in ("pending", "added", "discarded"):
+            raise ValueError(f"自動生成{i + 1}: 形式が正しくありません")
+        try:
+            check_subject(g.get("subject", ""))
+        except ValueError as e:
+            raise ValueError(f"自動生成{i + 1}: {e}") from None
+        row = {k: g.get(k) for k in GEN_FIELDS}
+        for k in ("unit", "front", "back", "text"):
+            row[k] = str(row[k] or "")
+        row["spans"] = row["spans"] if isinstance(row["spans"], str) else "[]"
+        row["trigger"] = str(row["trigger"] or "manual")
+        row["created_at"] = str(row["created_at"] or datetime.now().isoformat(timespec="seconds"))
+        row["created_date"] = str(row["created_date"] or row["created_at"][:10])
+        out.append(row)
+    return out
 
 
 def _validate_memos(data) -> list[dict]:
@@ -243,7 +267,9 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
     n_reviews = 0
     try:
         memos = _validate_memos(data)
+        generated = _validate_generated(data)
         if mode == "replace":
+            conn.execute("DELETE FROM generated")
             conn.execute("DELETE FROM memos")
             conn.execute("DELETE FROM reviews")
             conn.execute("DELETE FROM cards")
@@ -296,6 +322,9 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
                          (c["source"], inserted[k - 1] if k else 0, card_id))
         conn.executemany("INSERT INTO memos(text, subject, created_at) VALUES (?, ?, ?)",
                          [(m["text"], m["subject"], m["created_at"]) for m in memos])
+        cols = ", ".join(GEN_FIELDS)
+        conn.executemany(f"INSERT OR IGNORE INTO generated({cols}) VALUES ({', '.join('?' * len(GEN_FIELDS))})",
+                         [tuple(g[k] for k in GEN_FIELDS) for g in generated])
         conn.commit()
     except sqlite3.IntegrityError as e:
         conn.rollback()

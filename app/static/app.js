@@ -225,6 +225,7 @@ function cardForm(el, init = {}) {
     <div class="field-head"><b>表面</b><span class="muted">穴埋め {{c1::語句}} / {{c1::語句::ヒント}}</span><span class="spacer"></span>
       <button type="button" class="btn small" data-a="cloze">選んだ語句を穴埋め <kbd>Alt</kbd>+<kbd>C</kbd></button>
       <button type="button" class="btn small" data-a="uncloze" title="カーソルを穴埋めの中に置くか、範囲を選んで押す">穴埋めを解除 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></button>
+      <button type="button" class="btn small" data-a="steps" title="計算の解き方を1行1手順で書き、その行を選んで押す">選んだ行を手順にする</button>
       <button type="button" class="btn small" data-a="img" data-side="front">画像を追加</button></div>
     <textarea class="cf-front" rows="4" placeholder="例：β1受容体を刺激すると心拍数は{{c1::増加::増減}}する"></textarea>
     <div class="sub cf-cap">プレビュー<span class="cf-imgnote" hidden>　—　<b>画像をクリック（タップ）すると、画像の上に穴を作れます</b></span></div>
@@ -308,6 +309,9 @@ function cardForm(el, init = {}) {
   const unBtn = el.querySelector("[data-a=uncloze]");
   unBtn.addEventListener("mousedown", e => e.preventDefault());
   unBtn.addEventListener("click", () => unwrapCloze($f));
+  const stBtn = el.querySelector("[data-a=steps]");
+  stBtn.addEventListener("mousedown", e => e.preventDefault());
+  stBtn.addEventListener("click", () => wrapSteps($f));
   el.addEventListener("keydown", e => {
     if (e.code === "KeyC" && e.altKey && !e.ctrlKey && e.target.tagName === "TEXTAREA") {
       e.preventDefault();
@@ -367,7 +371,7 @@ async function tagPicker(input, box) {
 }
 
 /* ---------- ルーター ---------- */
-const PAGES = { today: pageToday, study: pageStudy, add: pageAdd, memos: pageMemos, cards: pageCards, past: pagePast,
+const PAGES = { today: pageToday, study: pageStudy, add: pageAdd, memos: pageMemos, cards: pageCards, past: pagePast, gen: pageGen,
   stats: pageStats, weak: pageWeak, data: pageData };
 
 async function route() {
@@ -378,6 +382,7 @@ async function route() {
   keyHandler = null;
   $main.innerHTML = "";
   try { await fn(params); } catch (e) { fail(e); }
+  refreshGenBadge();
 }
 window.addEventListener("hashchange", route);
 document.addEventListener("keydown", e => {
@@ -636,7 +641,8 @@ function forecastChart(el, rows, today) {
 }
 
 /* ---------- 学習：開始前の設定 ---------- */
-const ORDER_OPTS = [["due", "期日が古い順"], ["random", "ランダム"], ["added", "追加した順（古い→新しい）"], ["added_desc", "追加した順（新しい→古い）"]];
+const ORDER_OPTS = [["due", "期日が古い順"], ["random", "ランダム"], ["added", "追加した順（古い→新しい）"], ["added_desc", "追加した順（新しい→古い）"],
+  ["grouped", "新規はテーマごと・復習は混ぜる"]];
 function newSessionId() {
   return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
@@ -649,6 +655,7 @@ async function pageStudy(params) {
     tags: params.has("tags") ? splitTags(params.get("tags").replace(/,/g, " ")) : (saved.tags || []),
     tag_mode: saved.tag_mode === "and" ? "and" : "or",
     order: ORDER_OPTS.some(([v]) => v === saved.order) ? saved.order : "due",
+    why: saved.why !== false,
   };
   const allTags = await api("GET", "tags").catch(() => []);
   st.tags = st.tags.filter(t => allTags.some(x => x.tag === t));
@@ -671,7 +678,9 @@ async function pageStudy(params) {
       </div></div>
       <div class="setup-row"><div class="setup-lab">順番</div><div><div class="chips" data-name="order">${ORDER_OPTS.map(([v, l]) =>
         `<button type="button" class="chip ${v === st.order ? "on" : ""}" data-v="${v}">${esc(l)}</button>`).join("")}</div>
-        <p class="sub">どの順番でも、✖ にしたカードは最後に1回だけ再確認として出ます。</p></div></div>
+        <p class="sub">どの順番でも、✖ にしたカードは最後に1回だけ再確認として出ます。「新規はテーマごと・復習は混ぜる」は、新しく覚えるカードを同じテーマで続けて出し（頭の負担を軽く）、覚えたあとの復習は科目をまたいで混ぜます。</p></div></div>
+      <div class="setup-row"><div class="setup-lab">✖ のとき</div><div><label class="row" style="gap:6px"><input type="checkbox" id="why" ${st.why ? "checked" : ""}>
+        間違えた理由・覚え方を一言書く欄を出す（書いた内容は裏面に足されます。空のまま Enter で飛ばせます）</label></div></div>
       <div class="row setup-start"><span id="count" class="sub"></span><span class="spacer"></span>
         <button class="btn primary big" id="start">始める <kbd>Enter</kbd></button></div>
     </div></div>`));
@@ -698,6 +707,7 @@ async function pageStudy(params) {
     refresh();
   })));
   $main.querySelector("#subject").addEventListener("change", e => { st.subject = e.target.value; refresh(); });
+  $main.querySelector("#why").addEventListener("change", e => { st.why = e.target.checked; store.set("study", st); });
   $main.querySelectorAll("#tags [data-t]").forEach(b => b.addEventListener("click", () => {
     const t = b.dataset.t;
     st.tags = st.tags.includes(t) ? st.tags.filter(x => x !== t) : [...st.tags, t];
@@ -709,7 +719,7 @@ async function pageStudy(params) {
   });
   function start() {
     if ($start.disabled) return;
-    const p = { run: 1, scope: st.scope, order: st.order };
+    const p = { run: 1, scope: st.scope, order: st.order, why: st.why ? 1 : 0 };
     if (st.subject) p.subject = st.subject;
     if (st.tags.length) { p.tags = st.tags.join(","); p.tag_mode = st.tag_mode; }
     if (st.scope === "practice") p.session = newSessionId();
@@ -750,7 +760,7 @@ async function runStudy(params) {
   </div>`);
   $main.append(wrap);
 
-  let current = null, revealed = false, busy = false, doneCount = 0, startTotal = null;
+  let current = null, revealed = false, busy = false, doneCount = 0, startTotal = null, genAfterSession = false;
   const stageEl = wrap.querySelector("#stage");
 
   async function load() {
@@ -785,6 +795,7 @@ async function runStudy(params) {
         <div class="row" style="justify-content:center"><a class="btn" href="#/today">今日の画面へ</a>
         ${session ? `<button class="btn primary" id="again">同じ条件でもう一度練習</button>` : ""}
         <a class="btn" href="#/study">条件を変えて続ける</a></div></div></div>`));
+      if (doneCount && !genAfterSession) { genAfterSession = true; autoGen("session"); }   // 学習を1回終えたら自動生成
       stageEl.querySelector("#again")?.addEventListener("click", () => {
         const p = Object.fromEntries(params.entries()); p.session = newSessionId(); go("study", p);
       });
@@ -850,8 +861,38 @@ async function runStudy(params) {
       const res = await api("POST", "review", session ? { card_id: current.id, rating: r, session } : { card_id: current.id, rating: r });
       if (res.leech) toast(`✖ が${META.leech_threshold}回になったので「${META.leech_tag}」を付けました（苦手リストで作り直せます）`);
       doneCount++;
+      if (r === "again" && params.get("why") === "1") await askWhy(current.id);
       await load();
     } catch (e) { fail(e); } finally { busy = false; }
+  }
+  /* ✖ のとき、間違えた理由・覚え方を一言（C6）。Enter で保存（空なら飛ばす）、Esc で飛ばす */
+  function askWhy(cardId) {
+    return new Promise(resolve => {
+      const bar = stageEl.querySelector(".answer-bar");
+      bar.innerHTML = `<div class="why-box"><label class="field">間違えた理由・覚え方を一言（任意。裏面に足されます）
+        <input type="text" id="whyText" maxlength="200" placeholder="例：β1 と β2 を取り違えた／語呂：〇〇"></label>
+        <div class="row"><button class="btn primary small" id="whySave">保存して次へ <kbd>Enter</kbd></button>
+        <button class="btn small" id="whySkip">飛ばす <kbd>Esc</kbd></button></div></div>`;
+      const input = bar.querySelector("#whyText");
+      const prevKeys = keyHandler;
+      keyHandler = null;
+      const finish = async save => {
+        input.removeEventListener("keydown", onKey);
+        keyHandler = prevKeys;
+        if (save && input.value.trim()) {
+          try { await api("POST", `cards/${cardId}/note`, { text: input.value }); toast("裏面にメモを足しました"); } catch (e) { fail(e); }
+        }
+        resolve();
+      };
+      const onKey = e => {
+        if (e.key === "Enter") { e.preventDefault(); finish(true); }
+        else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      };
+      input.addEventListener("keydown", onKey);
+      bar.querySelector("#whySave").addEventListener("click", () => finish(true));
+      bar.querySelector("#whySkip").addEventListener("click", () => finish(false));
+      input.focus();
+    });
   }
   async function toggleFlag() {   // 学習を止めずに「あとで直す」印を付け外し（開けた穴はそのまま）
     if (!current) return;
@@ -955,8 +996,17 @@ function addSingle(body, $s, $u, $t, picker, prefill = null) {
     saving = true;
     try {
       if (!prefill) store.set("unit:" + $s.value, $u.value.trim());
-      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, tags: $t.value, ...form.get(),
-        ...(prefill?.source ? { source: prefill.source } : {}) });
+      const body = { subject: $s.value, unit: $u.value, tags: $t.value, ...form.get(), ...(prefill?.source ? { source: prefill.source } : {}) };
+      const choice = await overloadChoice(body.front, body.masks);
+      if (choice === "cancel") return;
+      let c;
+      if (choice === "split") {
+        const r = await api("POST", "cards/split", body);
+        c = await api("GET", "cards/" + r.card_ids[0]);
+        toast(`穴ごとに分けて ${r.card_ids.length}枚 追加しました`);
+      } else {
+        c = await api("POST", "cards", body);
+      }
       if (prefill) {   // 下書きから作ったら、元の画面（メモ箱・過去問）に戻る
         if (prefill.kind === "memo") await api("DELETE", "memos/" + prefill.memoId).catch(() => {});
         toast(prefill.kind === "memo" ? "カードを追加し、メモを消しました" : "過去問からカードを追加しました");
@@ -1206,7 +1256,16 @@ async function openEditor(id, onChange) {
   const close = () => dlg.close();
   async function save() {
     try {
-      await api("PUT", "cards/" + id, { subject: form.subject.value, unit: form.unit.value, tags: form.tags.value, ...cf.get() });
+      const body = { subject: form.subject.value, unit: form.unit.value, tags: form.tags.value, ...cf.get() };
+      const choice = await overloadChoice(body.front, body.masks);
+      if (choice === "cancel") return;
+      if (choice === "split") {
+        if (!confirm("このカードを、穴ごとの新しいカードに分けます。元のカードと、その評価の履歴は消えます。よろしいですか？")) return;
+        const r = await api("POST", "cards/split", { ...body, source: c.source, replace_id: id });
+        toast(`穴ごとに ${r.card_ids.length}枚 に分けました`); close(); onChange && onChange("deleted");
+        return;
+      }
+      await api("PUT", "cards/" + id, body);
       toast("保存しました"); close(); onChange && onChange("saved");
     } catch (e) { fail(e); }
   }
@@ -1419,9 +1478,177 @@ function showLogin() {
   });
 }
 
+/* ---------- 詰め込みすぎの確認（C2）：分けるかどうかは自分で選ぶ ---------- */
+function holeStats(front, masks) {
+  const text = String(front || "");
+  const clozes = (text.match(/\{\{c\d+::/g) || []).length;
+  const steps = /\{\{s\d+::/.test(text) ? 1 : 0;
+  const rects = Object.values(masks || {}).reduce((a, v) => a + v.length, 0);
+  const plain = text.replace(/\{\{[cs]\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, "$1").replace(/\[\[img:\d+\]\]/g, "");
+  return { holes: clozes + steps + rects, units: clozes + rects, length: plain.trim().length };
+}
+/* 戻り値: "keep"（このまま保存）/ "split"（穴ごとに分ける）/ "cancel"（戻って直す） */
+function overloadChoice(front, masks) {
+  const st = holeStats(front, masks);
+  const many = st.holes >= META.overload_holes, long = st.length > 200;
+  if (!many && !long) return Promise.resolve("keep");
+  return new Promise(resolve => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "modal";
+    dlg.innerHTML = `<div class="mh"><b>1枚に詰め込みすぎていませんか？</b></div>
+      <div class="mb"><p>${many ? `穴が <b>${st.holes}個</b> あります。` : ""}${long ? `文が <b>${st.length}文字</b> あります。` : ""}</p>
+        <p class="sub">1枚に覚えることが多いと、一度に頭で処理する量が増えて覚えにくくなります（認知負荷）。
+          穴ごとに別のカードに分けると、1枚1枚が軽くなり、どこが苦手かもはっきりします。</p>
+        ${st.units >= 2 ? `<p class="sub">「穴ごとに分ける」を選ぶと、穴1つ（四角形1つ）ずつの <b>${st.units}枚</b> になります。ほかの穴は答えの語句に戻ります。</p>` : ""}</div>
+      <div class="mf">${st.units >= 2 ? `<button class="btn primary" data-v="split">穴ごとに分ける（${st.units}枚）</button>` : ""}
+        <button class="btn" data-v="keep">このまま保存</button><span class="spacer"></span>
+        <button class="btn" data-v="cancel">戻って直す</button></div>`;
+    document.body.append(dlg);
+    let answer = "cancel";
+    dlg.querySelectorAll("[data-v]").forEach(b => b.addEventListener("click", () => { answer = b.dataset.v; dlg.close(); }));
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(answer); });
+    dlg.showModal();
+  });
+}
+
+/* 選んだ行を計算の手順 {{s1::…}} {{s2::…}} にする（C5） */
+function wrapSteps(ta) {
+  const v = ta.value;
+  let a = ta.selectionStart, b = ta.selectionEnd;
+  a = v.lastIndexOf("\n", a - 1) + 1;
+  const e = v.indexOf("\n", b);
+  b = e === -1 ? v.length : e;
+  const nums = [...v.matchAll(/\{\{s(\d+)::/g)].map(m => +m[1]);
+  let n = nums.length ? Math.max(...nums) : 0;
+  const lines = v.slice(a, b).split("\n").map(line => {
+    if (!line.trim() || /\{\{s\d+::/.test(line)) return line;
+    n += 1;
+    return `{{s${n}::${line.trim()}}}`;
+  });
+  if (!n) { toast("手順にしたい行（1行に1手順）を選んでから押してください", true); return; }
+  ta.focus();
+  ta.setRangeText(lines.join("\n"), a, b, "select");
+  ta.dispatchEvent(new Event("input"));
+}
+
+/* ---------- 自動生成 ---------- */
+async function refreshGenBadge() {
+  try {
+    const r = await api("GET", "generated/count");
+    const b = document.getElementById("genBadge");
+    b.textContent = r.pending ? String(r.pending) : "";
+    b.hidden = !r.pending;
+  } catch { /* 表示できなくても動作に影響なし */ }
+}
+async function autoGen(trigger) {
+  try {
+    const r = await api("POST", "generated/run", { trigger });
+    if (r.created) toast(`自動生成：新しいカードが ${r.created}枚 できました（未処理 ${r.pending}枚）。「自動生成」タブで追加するか選んでください`);
+    refreshGenBadge();
+    return r;
+  } catch (e) { console.warn(e); return null; }
+}
+
+async function pageGen() {
+  const [items, info] = await Promise.all([api("GET", "generated"), api("GET", "generated/style")]);
+  const sty = info.style;
+  const reasons = Object.entries(META.gen_reasons);
+  $main.append(h(`<div>
+    <div class="row" style="margin-bottom:12px"><h1 style="margin:0">自動生成</h1>
+      <span class="tag ${items.length ? "warn" : ""}">未処理 ${items.length}枚</span>
+      <span class="sub">（${META.gen_pending_limit}枚を超えると作るのを止めます）</span><span class="spacer"></span>
+      <button class="btn primary" id="genNow">今すぐ作る</button></div>
+    <div class="grid g2">
+      <div class="panel"><h2>苦手なテーマ（直近30日の演習から）</h2>
+        ${info.weak.length ? `<table><thead><tr><th>科目／テーマ</th><th class="num">評価</th><th class="num">✖</th><th class="num">要見直し</th></tr></thead><tbody>
+          ${info.weak.map(w => `<tr><td>${esc(w.subject)}／${esc(w.theme)}</td><td class="num">${w.reviews}</td><td class="num r-again">${w.again}</td><td class="num">${w.leech}</td></tr>`).join("")}</tbody></table>`
+          : `<p class="muted">まだ演習の結果がありません。カードの「系統」を出題テーマ名にして学習すると、苦手なテーマから作られます。</p>`}</div>
+      <div class="panel"><h2>あなたの作り方の学習</h2>
+        <p class="sub">あなたのカードで穴にした語句の傾向（語句の種類・長さ・文中の位置など）を数えて、同じような場所に穴を開けます。カードが増えるほど、あなたの傾向の比重が上がります。</p>
+        <ul class="tips"><li>手本にしたカード：${sty.cards}枚（穴 ${sty.holes}か所）</li>
+          <li>あなたの傾向の比重：<b>${Math.round(sty.alpha * 100)}%</b>（残りは標準のルール）</li>
+          <li>1枚の穴の数：${sty.target_holes}つ　／　ヒント：${sty.use_hints ? "付ける" : "付けない"}</li>
+          ${sty.favorite_types.length ? `<li>よく穴にする語句：${sty.favorite_types.map(esc).join("・")}</li>` : ""}
+          <li>破棄の理由（${reasons.map(([, l]) => l).join("・")}）も、次の作り方に反映します</li></ul></div>
+    </div>
+    <div id="glist"></div></div>`));
+  $main.querySelector("#genNow").addEventListener("click", async () => {
+    const r = await autoGen("manual");
+    if (r && !r.created) {
+      const why = { pending_limit: `未処理が${META.gen_pending_limit}枚あるので作りませんでした。先に追加か破棄をしてください`,
+        no_results: "演習の結果があるテーマがまだありません", daily_limit: "今日の上限に達しました" }[r.skipped]
+        || "新しく作れる知識が見つかりませんでした（苦手なテーマの材料をすべて使ったか、すでにカードがあります）";
+      toast(why, true);
+    }
+    route();
+  });
+  const list = $main.querySelector("#glist");
+  if (!items.length) { list.innerHTML = `<div class="panel empty">未処理のカードはありません</div>`; return; }
+  list.innerHTML = items.map(g => `<div class="panel gen-card" data-id="${g.id}">
+      <div class="row"><span class="tag accent">${esc(g.subject)}</span><span class="tag">${esc(g.unit)}</span>
+        <span class="tag">${esc(META.gen_kinds[g.kind] || g.kind)}</span><span class="sub">${fmtDate(g.created_date)}</span><span class="spacer"></span>
+        <button class="btn small" data-a="peek">答えを見る</button></div>
+      <div class="gen-q">${g.question_html}</div>
+      <div class="sub gen-back">${g.back_html}</div>
+      <div class="row gen-actions"><button class="btn primary small" data-a="add">追加</button>
+        <button class="btn small" data-a="edit">直して追加</button><span class="spacer"></span>
+        <span class="sub">破棄：</span>${reasons.map(([k, l]) => `<button class="chip" data-a="discard" data-r="${k}">${esc(l)}</button>`).join("")}
+        <button class="chip" data-a="discard" data-r="">理由なし</button></div></div>`).join("");
+  const done = (el, msg) => { el.classList.add("gen-done"); el.innerHTML = `<p class="sub">${esc(msg)}</p>`; refreshGenBadge(); };
+  list.querySelectorAll(".gen-card").forEach(el => {
+    const id = +el.dataset.id, g = items.find(x => x.id === id);
+    el.querySelector("[data-a=peek]").addEventListener("click", () => el.querySelectorAll(".gen-q .cl").forEach(x => x.classList.toggle("open")));
+    el.querySelector("[data-a=add]").addEventListener("click", async () => {
+      try { await api("POST", `generated/${id}/add`, {}); done(el, "追加しました（タグ「自動生成」）"); } catch (e) { fail(e); }
+    });
+    el.querySelector("[data-a=edit]").addEventListener("click", () => editGenerated(g, ok => ok && done(el, "直して追加しました")));
+    el.querySelectorAll("[data-a=discard]").forEach(b => b.addEventListener("click", async () => {
+      try {
+        await api("POST", `generated/${id}/discard`, { reason: b.dataset.r || null });
+        done(el, b.dataset.r ? `破棄しました（${META.gen_reasons[b.dataset.r]}）。次の作り方に反映します` : "破棄しました");
+      } catch (e) { fail(e); }
+    }));
+  });
+}
+
+function editGenerated(g, onDone) {
+  const dlg = document.createElement("dialog");
+  dlg.className = "modal";
+  dlg.innerHTML = `<form method="dialog">
+    <div class="mh"><b>直して追加</b><span class="sub">穴埋めは自由に直せます（${esc(META.gen_kinds[g.kind] || "")}）</span><span class="spacer"></span>
+      <button class="btn small" value="cancel" formnovalidate>閉じる</button></div>
+    <div class="mb"><div class="form-grid" style="margin-bottom:12px">
+      <label class="field">科目<select name="subject">${subjectOptions(g.subject)}</select></label>
+      <label class="field">系統・単元<input type="text" name="unit" value="${esc(g.unit)}"></label>
+      <label class="field" style="grid-column:1/-1">タグ<input type="text" name="tags" value="${esc(META.gen_tag)}"></label></div>
+      <div class="cf"></div></div>
+    <div class="mf"><button class="btn primary" value="save">追加する <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button></div></form>`;
+  document.body.append(dlg);
+  const form = dlg.querySelector("form");
+  const cf = cardForm(dlg.querySelector(".cf"), { front: g.front, back: g.back });
+  let ok = false;
+  async function save() {
+    const body = { subject: form.subject.value, unit: form.unit.value, tags: form.tags.value, ...cf.get() };
+    const choice = await overloadChoice(body.front, body.masks);
+    if (choice === "cancel") return;
+    try {
+      await api("POST", `generated/${g.id}/add`, { ...body, split: choice === "split" });
+      ok = true;
+      toast(choice === "split" ? "穴ごとに分けて追加しました" : "直して追加しました");
+      dlg.close();
+    } catch (e) { fail(e); }
+  }
+  form.addEventListener("submit", e => { if (e.submitter && e.submitter.value === "save") { e.preventDefault(); save(); } });
+  form.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); } });
+  dlg.addEventListener("close", () => { dlg.remove(); onDone(ok); });
+  dlg.showModal();
+  cf.focus();
+}
+
 /* ---------- 起動 ---------- */
 (async function init() {
   try { META = await api("GET", "meta"); }
   catch (e) { if (!loginShown) $main.innerHTML = `<div class="panel empty">${esc(e.message)}</div>`; return; }
   route();
+  autoGen("daily");   // その日初めて開いたときに自動生成
 })();

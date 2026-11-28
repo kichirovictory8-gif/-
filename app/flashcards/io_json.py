@@ -18,7 +18,9 @@
   ]
 }
 "counted": false は「学習状況のリセット前の評価」（履歴としては残るが集計に数えない）。
-"practice_session" は練習（全カード）での評価（間隔・集計に影響しない）。tags / practice_session は省略可。
+"practice_session" は練習（全カード）での評価（間隔・集計に影響しない）。
+"source" は過去問から作ったカードの出どころ、"leech_after_reviews" は「要見直し」を外した時点までの
+そのカードの評価の数（以降の ✖ を数え直す）。"memos" はメモ箱。これらとtags / practice_session は省略可。
 """
 from __future__ import annotations
 
@@ -68,6 +70,9 @@ def export_data(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             "thumb_mime": im["thumb_mime"],
             "created_at": im["created_at"],
         })
+    review_ids: dict[int, list[int]] = {}
+    for r in conn.execute("SELECT id, card_id FROM reviews ORDER BY id"):
+        review_ids.setdefault(r["card_id"], []).append(r["id"])
     for c in conn.execute("SELECT * FROM cards ORDER BY id"):
         try:
             masks = json.loads(c["masks"] or "{}")
@@ -81,14 +86,17 @@ def export_data(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             "back": c["back"],
             "masks": masks,
             "tags": tags_by_card.get(c["id"], []),
+            "source": c["source"],
+            "leech_after_reviews": sum(1 for i in review_ids.get(c["id"], []) if i <= c["leech_after"]),
             "stage": c["stage"],
             "due": c["due"],
             "created_at": c["created_at"],
             "updated_at": c["updated_at"],
             "reviews": reviews_by_card.get(c["id"], []),
         })
+    memos = [dict(m) for m in conn.execute("SELECT text, subject, created_at FROM memos ORDER BY id")]
     return {"format": APP_ID, "version": FORMAT_VERSION,
-            "exported_at": now.isoformat(timespec="seconds"), "images": images, "cards": cards}
+            "exported_at": now.isoformat(timespec="seconds"), "images": images, "cards": cards, "memos": memos}
 
 
 def _check_date(value, name: str, idx: int) -> str:
@@ -121,6 +129,19 @@ def _session(value, idx: int):
     if not isinstance(value, str) or not SESSION_RE.match(value):
         raise ValueError(f"{idx + 1}枚目: practice_session が正しくありません")
     return value
+
+
+def _validate_memos(data) -> list[dict]:
+    out = []
+    for i, m in enumerate(data.get("memos") or []):
+        if not isinstance(m, dict) or not str(m.get("text") or "").strip():
+            raise ValueError(f"メモ{i + 1}: 形式が正しくありません")
+        subject = str(m.get("subject") or "")
+        if subject:
+            check_subject(subject)
+        out.append({"text": str(m["text"]).strip()[:2000], "subject": subject,
+                    "created_at": str(m.get("created_at") or datetime.now().isoformat(timespec="seconds"))})
+    return out
 
 
 def _validate_images(data) -> list[dict]:
@@ -185,7 +206,10 @@ def _validate(data) -> list[dict]:
             tags = normalize_tags(c.get("tags") or [])
         except ValueError as e:
             raise ValueError(f"{i + 1}枚目: {e}") from None
+        leech_n = c.get("leech_after_reviews", 0)
         out.append({
+            "source": str(c.get("source") or "")[:100],
+            "leech_after_reviews": leech_n if isinstance(leech_n, int) and leech_n >= 0 else 0,
             "tags": tags,
             "masks": masks,
             "id": c.get("id") if isinstance(c.get("id"), int) else None,
@@ -218,7 +242,9 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
             raise ValueError(f"{i + 1}枚目: JSON に含まれていない画像を使っています: {sorted(missing)}")
     n_reviews = 0
     try:
+        memos = _validate_memos(data)
         if mode == "replace":
+            conn.execute("DELETE FROM memos")
             conn.execute("DELETE FROM reviews")
             conn.execute("DELETE FROM cards")
             conn.execute("DELETE FROM images")
@@ -251,6 +277,7 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
             card_id = cur.lastrowid
             conn.executemany("INSERT INTO card_tags(card_id, tag) VALUES (?, ?)", [(card_id, t) for t in c["tags"]])
             reset_id = 0
+            inserted: list[int] = []
             for rv in c["reviews"]:
                 rcur = conn.execute(
                     "INSERT INTO reviews(card_id, reviewed_at, review_date, rating, stage_before, stage_after,"
@@ -259,10 +286,16 @@ def import_data(conn: sqlite3.Connection, data, mode: str) -> dict:
                      rv["stage_after"], rv["is_recheck"], rv["practice_session"]),
                 )
                 n_reviews += 1
+                inserted.append(rcur.lastrowid)
                 if not rv["counted"]:
                     reset_id = rcur.lastrowid
             if reset_id:
                 conn.execute("UPDATE cards SET reset_review_id=? WHERE id=?", (reset_id, card_id))
+            k = min(c["leech_after_reviews"], len(inserted))
+            conn.execute("UPDATE cards SET source=?, leech_after=? WHERE id=?",
+                         (c["source"], inserted[k - 1] if k else 0, card_id))
+        conn.executemany("INSERT INTO memos(text, subject, created_at) VALUES (?, ?, ?)",
+                         [(m["text"], m["subject"], m["created_at"]) for m in memos])
         conn.commit()
     except sqlite3.IntegrityError as e:
         conn.rollback()

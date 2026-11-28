@@ -121,6 +121,33 @@ class ServerTest(unittest.TestCase):
         s, lst = self.call("GET", "/api/cards?tag=" + quote("タグA"))
         self.assertEqual(lst["total"], 1)
 
+    def test_study_aids_api(self):
+        from urllib.parse import quote
+        s, m = self.call("POST", "/api/memos", {"text": "あとで調べる", "subject": "薬理"})
+        self.assertEqual(s, 201)
+        s, ms = self.call("GET", "/api/memos")
+        self.assertIn(m["id"], [x["id"] for x in ms])
+        s, d = self.call("GET", "/api/dashboard")
+        self.assertGreaterEqual(d["memos"], 1)
+        s, _ = self.call("DELETE", f"/api/memos/{m['id']}")
+        self.assertEqual(s, 200)
+        s, r = self.call("GET", "/api/past?subject=" + quote("化学") + "&limit=3")
+        self.assertEqual((r["total"], len(r["items"])), (50, 3))
+        s, th = self.call("GET", "/api/past/themes?subject=" + quote("化学"))
+        self.assertTrue(th and th[0]["subject"] == "化学")
+        s, dr = self.call("GET", "/api/past/draft?id=104-2&style=cloze")
+        self.assertIn("{{c1::", dr["front"])
+        s, c = self.call("POST", "/api/cards", {k: dr[k] for k in ("subject", "unit", "front", "back", "tags", "source")})
+        self.assertEqual((s, c["source"]), (201, "hissu:104-2"))
+        s, cov = self.call("GET", "/api/past/coverage")
+        self.assertGreaterEqual(cov["summary"]["covered"], 1)
+        s, f = self.call("POST", f"/api/cards/{c['id']}/flag", {"on": True})
+        self.assertIn("あとで直す", f["tags"])
+        s, d = self.call("GET", "/api/dashboard")
+        self.assertGreaterEqual(d["flagged"], 1)
+        s, _ = self.call("GET", "/api/past/draft?id=104-2&style=bad")
+        self.assertEqual(s, 400)
+
     def test_csrf_and_host(self):
         s, _ = self.call("POST", "/api/cards", {"subject": "薬理", "front": "a", "back": "b"},
                          headers={"X-Yakushi-Flash": ""})

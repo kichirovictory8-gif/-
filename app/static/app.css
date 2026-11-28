@@ -328,3 +328,22 @@ textarea.drop { outline: 2px dashed var(--accent); outline-offset: 2px; backgrou
 .setup-start { padding-top: 16px; }
 @media (max-width: 640px) { .setup-row { grid-template-columns: 1fr; gap: 6px; } }
 @media (pointer: coarse) { .chip { padding: 7px 14px; font-size: 14px; } }
+
+/* ---- メモ・過去問・画像から作る ---- */
+.memo-btn { margin-left: auto; }
+.memo-text { white-space: normal; overflow-wrap: anywhere; min-width: 240px; }
+.notice { background: var(--accent-soft); border-color: transparent; color: var(--ink); font-size: 14px; padding: 10px 16px; }
+.dropzone { margin-top: 12px; border: 2px dashed var(--border-strong); border-radius: 12px; padding: 36px 20px; text-align: center; cursor: pointer; background: var(--surface-2); }
+.dropzone:focus, .dropzone.drop { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+.dz-big { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.past-q { padding: 14px 18px; }
+.past-q + .past-q { margin-top: 10px; }
+.past-stem { margin: 8px 0 4px; overflow-wrap: anywhere; }
+.past-opts { margin: 4px 0 0; padding-left: 24px; }
+.past-opts li.correct { color: var(--good-ink); font-weight: 700; }
+.past-opts li.correct::after { content: "　← 正答"; font-size: 12px; }
+.tag.ok { color: var(--good-ink); border-color: var(--good-ink); background: transparent; }
+tr.zero td { background: color-mix(in srgb, var(--again) 6%, transparent); }
+.flag-on { border-color: var(--fair); color: var(--fair-ink); font-weight: 700; }
+.tips { margin: 6px 0 12px; padding-left: 20px; font-size: 14px; }
+.tips li { margin: 3px 0; }

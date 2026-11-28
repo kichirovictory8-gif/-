@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, shortcut, srs, stats, storage  # noqa: E402
+from flashcards import APP_ID, VERSION, cloze, db, io_json, lan, past, shortcut, srs, stats, storage  # noqa: E402
 from flashcards.bulk import parse_bulk  # noqa: E402
 from flashcards.subjects import SUBJECTS  # noqa: E402
 
@@ -212,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
                 "today": st.today().isoformat(), "db_path": str(app.db_file),
                 "backup_dir": str(app.backups), "lan": app.lan, "is_local": self._is_local(),
                 "can_shortcut": sys.platform == "win32" and self._is_local(),
+                "past_available": past.available(), "flag_tag": db.FLAG_TAG,
+                "leech_tag": db.LEECH_TAG, "leech_threshold": db.LEECH_THRESHOLD,
             }
             if app.lan and self._is_local():
                 meta["passcode"] = app.auth.passcode
@@ -224,7 +226,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"passcode": app.auth.change_passcode()})
 
         if route == ("GET", "dashboard"):
-            return self._json(stats.dashboard(conn, st.today()))
+            d = stats.dashboard(conn, st.today())
+            d["memos"] = conn.execute("SELECT COUNT(*) FROM memos").fetchone()[0]
+            for key, tag in (("flagged", db.FLAG_TAG), ("leech", db.LEECH_TAG)):
+                d[key] = conn.execute("SELECT COUNT(*) FROM card_tags WHERE tag = ?", (tag,)).fetchone()[0]
+            return self._json(d)
+
+        if parts[0] == "memos":
+            if method == "GET" and len(parts) == 1:
+                return self._json(st.list_memos())
+            if method == "POST" and len(parts) == 1:
+                return self._json(st.add_memo(str(body.get("text", "")), str(body.get("subject", ""))), 201)
+            if len(parts) == 2 and method == "GET":
+                return self._json(st.get_memo(_int(parts[1])))
+            if len(parts) == 2 and method == "DELETE":
+                st.delete_memo(_int(parts[1]))
+                return self._json({"deleted": _int(parts[1])})
+
+        if parts[0] == "past" and method == "GET":
+            kind = parts[1] if len(parts) > 1 else ""
+            if kind == "":
+                return self._json(past.search(
+                    conn, subject=q.get("subject", ""), theme=q.get("theme", ""), q=q.get("q", ""),
+                    hide_made=q.get("hide_made") == "1",
+                    limit=max(1, min(100, _int(q.get("limit", 30), "limit"))),
+                    offset=max(0, _int(q.get("offset", 0), "offset"))))
+            if kind == "themes":
+                return self._json(past.themes(q.get("subject", "")))
+            if kind == "draft":
+                return self._json(past.draft(q.get("id", ""), q.get("style", "qa") or "qa"))
+            if kind == "coverage":
+                return self._json(past.coverage(conn, q.get("subject", "")))
 
         if parts[0] == "session" and method == "GET" and parts[1:] in (["next"], ["count"]):
             filt = {"subject": q.get("subject", ""), "tags": q.get("tags", ""),
@@ -347,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST":
                 card_id = st.add_card(body.get("subject", ""), body.get("unit", ""),
                                       body.get("front", ""), body.get("back", ""), body.get("masks"),
-                                      body.get("tags"))
+                                      body.get("tags"), str(body.get("source") or ""))
                 return self._json(st.get_card(card_id), 201)
         if rest == ["bulk"] and method == "POST":
             parsed = parse_bulk(str(body.get("text", "")))
@@ -378,6 +410,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 st.delete_card(card_id)
                 return self._json({"deleted": card_id})
+        if rest[1:] == ["flag"] and method == "POST":
+            return self._json({"tags": st.set_flag(card_id, bool(body.get("on")))})
         if rest[1:] == ["reset"] and method == "POST":
             st.reset_card(card_id)
             return self._json(st.get_card(card_id))

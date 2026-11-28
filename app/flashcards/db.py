@@ -13,7 +13,7 @@ from . import cloze, srs
 from .subjects import SUBJECTS, check_subject
 from .tags import normalize_tags
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, id);
 CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(review_date);
+CREATE TABLE IF NOT EXISTS memos (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT    NOT NULL,
+    subject    TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL
+);
 CREATE TABLE IF NOT EXISTS card_tags (
     card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
     tag     TEXT    NOT NULL,
@@ -123,6 +129,10 @@ ORDERS = {
     "added_desc": "c.id DESC",     # 追加した順（新しい → 古い）
 }
 TAG_MODES = ("or", "and")
+FLAG_TAG = "あとで直す"      # 学習中に F キーで付け外しするタグ
+LEECH_TAG = "要見直し"       # ✖ が続いたカードに自動で付けるタグ
+LEECH_THRESHOLD = 4          # 通算の ✖ の回数（再確認・練習は数えない）
+MAX_MEMO = 2000
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
@@ -177,6 +187,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(cards)")}
     if "masks" not in cols:
         conn.execute("ALTER TABLE cards ADD COLUMN masks TEXT NOT NULL DEFAULT '{}'")
+    if "source" not in cols:   # 過去問から作ったカードの出どころ（hissu:<回>-<問>）
+        conn.execute("ALTER TABLE cards ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+    if "leech_after" not in cols:   # 「要見直し」を外した時点の評価 id（それ以降の ✖ を数え直す）
+        conn.execute("ALTER TABLE cards ADD COLUMN leech_after INTEGER NOT NULL DEFAULT 0")
     rcols = {r[1] for r in conn.execute("PRAGMA table_info(reviews)")}
     if "practice_session" not in rcols:
         conn.execute("ALTER TABLE reviews ADD COLUMN practice_session TEXT")
@@ -206,10 +220,14 @@ class Store:
         return srs.study_date(self.now())
 
     # ---- カード ----
-    def add_card(self, subject: str, unit: str, front: str, back: str, masks=None, tags=None) -> int:
+    def add_card(self, subject: str, unit: str, front: str, back: str, masks=None, tags=None,
+                 source: str = "") -> int:
         tags = normalize_tags(tags)
         card_id = self._add_no_commit(subject, unit, front, back, masks)
         self._set_tags(card_id, tags)
+        source = str(source or "").strip()[:100]
+        if source:
+            self.conn.execute("UPDATE cards SET source = ? WHERE id = ?", (source, card_id))
         self.conn.commit()
         return card_id
 
@@ -259,7 +277,11 @@ class Store:
         self._require(card_id)
         subject, unit, front, back, masks = self._validate(subject, unit, front, back, masks)
         if tags is not None:
-            self._set_tags(card_id, normalize_tags(tags))
+            new = normalize_tags(tags)
+            old = self._tags_of(card_id)
+            if LEECH_TAG in old and LEECH_TAG not in new:
+                self._clear_leech(card_id)
+            self._set_tags(card_id, new)
         self.conn.execute(
             "UPDATE cards SET subject=?, unit=?, front=?, back=?, masks=?, updated_at=? WHERE id=?",
             (subject, unit, front, back, masks, _iso(self.now()), card_id),
@@ -269,6 +291,55 @@ class Store:
     def _set_tags(self, card_id: int, tags: list[str]) -> None:
         self.conn.execute("DELETE FROM card_tags WHERE card_id = ?", (card_id,))
         self.conn.executemany("INSERT INTO card_tags(card_id, tag) VALUES (?, ?)", [(card_id, t) for t in tags])
+
+    def _tags_of(self, card_id: int) -> list[str]:
+        return [r[0] for r in self.conn.execute("SELECT tag FROM card_tags WHERE card_id = ?", (card_id,))]
+
+    def _clear_leech(self, card_id: int) -> None:
+        """「要見直し」を外したので、ここから ✖ を数え直す。"""
+        max_id = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM reviews").fetchone()[0]
+        self.conn.execute("UPDATE cards SET leech_after = ? WHERE id = ?", (max_id, card_id))
+
+    def set_flag(self, card_id: int, on: bool) -> list[str]:
+        """「あとで直す」タグを付け外しする。"""
+        self._require(card_id)
+        if on:
+            self.conn.execute("INSERT OR IGNORE INTO card_tags(card_id, tag) VALUES (?, ?)", (card_id, FLAG_TAG))
+        else:
+            self.conn.execute("DELETE FROM card_tags WHERE card_id = ? AND tag = ?", (card_id, FLAG_TAG))
+        self.conn.commit()
+        return sorted(self._tags_of(card_id))
+
+    def again_count(self, card_id: int) -> int:
+        """「要見直し」の判定に使う ✖ の回数（リセット後・要見直しを外した後、再確認・練習を除く）。"""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM reviews r JOIN cards c ON c.id = r.card_id"
+            " WHERE r.card_id = ? AND r.rating = 'again' AND r.is_recheck = 0 AND r.practice_session IS NULL"
+            " AND r.id > c.reset_review_id AND r.id > c.leech_after", (card_id,)
+        ).fetchone()[0]
+
+    # ---- メモ箱 ----
+    def add_memo(self, text: str, subject: str = "") -> dict:
+        text = _clean_text(text, "メモ", True)[:MAX_MEMO]
+        subject = check_subject(subject) if subject else ""
+        cur = self.conn.execute("INSERT INTO memos(text, subject, created_at) VALUES (?, ?, ?)",
+                                (text, subject, _iso(self.now())))
+        self.conn.commit()
+        return self.get_memo(cur.lastrowid)
+
+    def get_memo(self, memo_id: int) -> dict:
+        row = self.conn.execute("SELECT * FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"メモが見つかりません: {memo_id}")
+        return dict(row)
+
+    def list_memos(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM memos ORDER BY id DESC")]
+
+    def delete_memo(self, memo_id: int) -> None:
+        self.get_memo(memo_id)
+        self.conn.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
+        self.conn.commit()
 
     def all_tags(self) -> list[dict]:
         """使われているタグと枚数（多い順）。"""
@@ -577,10 +648,15 @@ class Store:
             " practice_session) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (card_id, _iso(now), today.isoformat(), rating, stage, new_stage, is_recheck, session or None),
         )
+        leech = False
+        if rating == srs.AGAIN and not is_recheck and not session and LEECH_TAG not in self._tags_of(card_id):
+            if self.again_count(card_id) >= LEECH_THRESHOLD:
+                self.conn.execute("INSERT OR IGNORE INTO card_tags(card_id, tag) VALUES (?, ?)", (card_id, LEECH_TAG))
+                leech = True
         self.conn.commit()
         return {"card_id": card_id, "stage": new_stage, "due": new_due.isoformat(),
                 "interval": srs.interval_for(new_stage), "recheck": bool(is_recheck),
-                "practice": bool(session)}
+                "practice": bool(session), "leech": leech}
 
 
 __all__ = ["connect", "Store", "SUBJECTS", "COUNTED_CTE"]

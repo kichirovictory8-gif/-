@@ -367,7 +367,8 @@ async function tagPicker(input, box) {
 }
 
 /* ---------- ルーター ---------- */
-const PAGES = { today: pageToday, study: pageStudy, add: pageAdd, cards: pageCards, stats: pageStats, weak: pageWeak, data: pageData };
+const PAGES = { today: pageToday, study: pageStudy, add: pageAdd, memos: pageMemos, cards: pageCards, past: pagePast,
+  stats: pageStats, weak: pageWeak, data: pageData };
 
 async function route() {
   if (loginShown) return;
@@ -381,8 +382,166 @@ async function route() {
 window.addEventListener("hashchange", route);
 document.addEventListener("keydown", e => {
   if (document.querySelector("dialog[open]")) return;   // 編集・穴の編集の画面を開いている間は無効
+  if ((e.key === "m" || e.key === "M") && !isTyping(e) && !e.ctrlKey && !e.altKey && !e.metaKey && !loginShown && META) {
+    e.preventDefault(); openMemoDialog(); return;
+  }
   if (keyHandler) keyHandler(e);
 });
+document.getElementById("memoBtn").addEventListener("click", () => { if (META && !loginShown) openMemoDialog(); });
+
+/* ---------- メモ箱 ---------- */
+function openMemoDialog() {
+  const dlg = document.createElement("dialog");
+  dlg.className = "modal";
+  dlg.innerHTML = `<form method="dialog">
+    <div class="mh"><b>メモを書き留める</b><span class="sub">あとで「メモ」タブからカードにできます</span><span class="spacer"></span>
+      <button class="btn small" value="cancel" formnovalidate>閉じる</button></div>
+    <div class="mb"><textarea name="text" rows="4" placeholder="例：β遮断薬の禁忌（喘息）をカードにする"></textarea>
+      <div class="row" style="margin-top:8px"><label class="field" style="flex-direction:row;align-items:center;gap:8px">科目（任意）
+        <select name="subject">${subjectOptions(store.get("memoSubject", ""), "未定")}</select></label></div></div>
+    <div class="mf"><button class="btn primary" value="save">保存 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button></div></form>`;
+  document.body.append(dlg);
+  const form = dlg.querySelector("form");
+  async function save() {
+    try {
+      await api("POST", "memos", { text: form.text.value, subject: form.subject.value });
+      store.set("memoSubject", form.subject.value);
+      toast("メモを保存しました");
+      dlg.close();
+      if (["memos", "today"].includes(parseHash().page)) route();
+    } catch (e) { fail(e); }
+  }
+  form.addEventListener("submit", e => { if (e.submitter && e.submitter.value === "save") { e.preventDefault(); save(); } });
+  form.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); } });
+  dlg.addEventListener("close", () => dlg.remove());
+  dlg.showModal();
+  form.text.focus();
+}
+
+async function pageMemos() {
+  const memos = await api("GET", "memos");
+  $main.append(h(`<div>
+    <div class="row" style="margin-bottom:12px"><h1 style="margin:0">メモ箱</h1><span class="sub">${memos.length}件</span>
+      <span class="spacer"></span><button class="btn primary" id="newMemo">メモを書く <kbd>M</kbd></button></div>
+    <p class="sub">授業中や問題演習中は一言だけ書き留めておき、あとでまとめてカードにします。どの画面でも <kbd>M</kbd> キーか右上の「＋メモ」で書けます。「カードにする」で保存すると、メモは自動で消えます。</p>
+    <div class="panel">${memos.length ? `<div class="table-wrap"><table><thead><tr><th>メモ</th><th>科目</th><th>書いた日</th><th></th></tr></thead><tbody>
+      ${memos.map(m => `<tr><td class="memo-text">${esc(m.text).replace(/\n/g, "<br>")}</td><td>${esc(m.subject || "")}</td>
+        <td class="sub" style="white-space:nowrap">${fmtDate(m.created_at.slice(0, 10))}</td>
+        <td style="white-space:nowrap"><a class="btn small primary" href="#/add?memo=${m.id}">カードにする</a>
+          <button class="btn small danger" data-del="${m.id}">削除</button></td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="empty">メモはありません</p>`}</div></div>`));
+  $main.querySelector("#newMemo").addEventListener("click", openMemoDialog);
+  $main.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
+    if (!confirm("このメモを削除します。よろしいですか？")) return;
+    try { await api("DELETE", "memos/" + b.dataset.del); route(); } catch (e) { fail(e); }
+  }));
+}
+
+/* ---------- 過去問（探す・テーマ別カバー率） ---------- */
+async function pagePast(params) {
+  const view = params.get("view") === "coverage" ? "coverage" : "search";
+  $main.append(h(`<div>
+    <div class="row" style="margin-bottom:12px"><h1 style="margin:0">過去問</h1>
+      <div class="seg"><button data-v="search" class="${view === "search" ? "on" : ""}">問題を探してカードにする</button>
+        <button data-v="coverage" class="${view === "coverage" ? "on" : ""}">出題テーマ別カバー率</button></div></div>
+    <div id="pbody"></div></div>`));
+  $main.querySelectorAll(".seg [data-v]").forEach(b => b.addEventListener("click", () => go("past", b.dataset.v === "coverage" ? { view: "coverage" } : null)));
+  const el = $main.querySelector("#pbody");
+  if (!META.past_available) { el.innerHTML = `<div class="panel empty">過去問のデータ（flashcards/data/hissu.json）が見つかりません</div>`; return; }
+  if (view === "coverage") return pastCoverage(el);
+  return pastSearch(el, params);
+}
+
+async function pastSearch(el, params) {
+  const f = { subject: params.get("subject") || "", theme: params.get("theme") || "", q: params.get("q") || "",
+    hide_made: params.get("hide_made") === "1" };
+  let offset = +(params.get("offset") || 0);
+  const LIMIT = 20;
+  el.append(h(`<div><div class="panel">
+    <div class="row">
+      <select id="ps">${subjectOptions(f.subject, "科目：すべて")}</select>
+      <select id="pt"><option value="">テーマ：すべて</option></select>
+      <input type="search" id="pq" placeholder="キーワード（問題文・選択肢）" value="${esc(f.q)}" style="flex:1;min-width:180px">
+      <label class="row" style="gap:6px"><input type="checkbox" id="ph" ${f.hide_made ? "checked" : ""}> カード化済みを隠す</label>
+    </div>
+    <p class="sub" style="margin:8px 0 0">第102〜111回の必須問題900問。「下書き」を押すと追加画面に入るので、直してから保存してください。自分が間違えた・あやふやだった問題を選んでカードにするのがおすすめです。</p>
+  </div><div id="plist"></div><div class="pager" id="ppager"></div></div>`));
+  async function loadThemes() {
+    const ts = await api("GET", "past/themes" + (f.subject ? "?subject=" + encodeURIComponent(f.subject) : ""));
+    if (f.theme && !ts.some(t => t.theme === f.theme)) f.theme = "";
+    el.querySelector("#pt").innerHTML = `<option value="">テーマ：すべて</option>` + ts.map(t =>
+      `<option value="${esc(t.theme)}" ${t.theme === f.theme ? "selected" : ""}>${f.subject ? "" : esc(t.subject) + "／"}${esc(t.theme)}（10年で${t.questions}問）</option>`).join("");
+  }
+  const update = () => {
+    const p = {};
+    if (f.subject) p.subject = f.subject;
+    if (f.theme) p.theme = f.theme;
+    if (f.q) p.q = f.q;
+    if (f.hide_made) p.hide_made = "1";
+    if (offset) p.offset = offset;
+    history.replaceState(null, "", "#/past" + (Object.keys(p).length ? "?" + new URLSearchParams(p) : ""));
+    load();
+  };
+  async function load() {
+    const qs = new URLSearchParams({ limit: LIMIT, offset, subject: f.subject, theme: f.theme, q: f.q, hide_made: f.hide_made ? "1" : "" });
+    const r = await api("GET", "past?" + qs);
+    el.querySelector("#plist").innerHTML = r.items.length ? r.items.map(x => `<div class="panel past-q">
+        <div class="row"><b>第${x.kai}回 問${x.q}</b><span class="tag accent">${esc(x.subject)}</span><span class="tag">${esc(x.theme)}（10年で${x.theme_count}問）</span>
+          ${x.negative ? '<span class="tag warn">否定形</span>' : ""}${x.calc ? '<span class="tag">計算</span>' : ""}${x.figure ? '<span class="tag warn">図が必要</span>' : ""}
+          ${x.made ? `<span class="tag ok">カード化済み ${x.made}枚</span>` : ""}<span class="spacer"></span>
+          <a class="btn small primary" href="#/add?past=${x.id}&style=qa">下書き：問題＋選択肢 → 正答</a>
+          ${x.options.length ? `<a class="btn small" href="#/add?past=${x.id}&style=cloze">下書き：正答を穴埋め</a>` : ""}</div>
+        <div class="past-stem">${esc(x.stem)}</div>
+        ${x.options.length ? `<ol class="past-opts">${x.options.map((o, i) => `<li class="${String(i + 1) === x.answer ? "correct" : ""}">${esc(o)}</li>`).join("")}</ol>`
+          : `<p class="sub">（選択肢は図のため読み取れていません。正答：${esc(x.answer)}）</p>`}
+      </div>`).join("") : `<div class="panel empty">該当する問題はありません</div>`;
+    const pages = Math.max(1, Math.ceil(r.total / LIMIT)), cur = Math.floor(offset / LIMIT) + 1;
+    const pg = el.querySelector("#ppager");
+    pg.innerHTML = `<span class="sub">${r.total}問</span>` + (r.total > LIMIT ? `<button class="btn small" id="pp" ${cur <= 1 ? "disabled" : ""}>前へ</button>
+      <span class="sub">${cur} / ${pages}</span><button class="btn small" id="pn" ${cur >= pages ? "disabled" : ""}>次へ</button>` : "");
+    pg.querySelector("#pp")?.addEventListener("click", () => { offset = Math.max(0, offset - LIMIT); update(); window.scrollTo(0, 0); });
+    pg.querySelector("#pn")?.addEventListener("click", () => { offset += LIMIT; update(); window.scrollTo(0, 0); });
+  }
+  el.querySelector("#ps").addEventListener("change", async e => { f.subject = e.target.value; f.theme = ""; offset = 0; await loadThemes(); update(); });
+  el.querySelector("#pt").addEventListener("change", e => { f.theme = e.target.value; offset = 0; update(); });
+  let t = null;
+  el.querySelector("#pq").addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value.trim(); offset = 0; update(); }, 300); });
+  el.querySelector("#ph").addEventListener("change", e => { f.hide_made = e.target.checked; offset = 0; update(); });
+  await loadThemes();
+  await load();
+}
+
+async function pastCoverage(el) {
+  const cov = await api("GET", "past/coverage");
+  const s = cov.summary;
+  el.append(h(`<div>
+    <div class="tiles">
+      <div class="tile"><div class="label">カバー率（出題数で重み付け）</div><div class="value">${(s.rate * 100).toFixed(1)}<small>%</small></div>
+        <div class="note">カードのあるテーマの過去問 ÷ 全${s.questions}問</div></div>
+      <div class="tile"><div class="label">カードのあるテーマ</div><div class="value">${s.covered}<small>/ ${s.themes}</small></div>
+        <div class="note">テーマの数で数えた場合</div></div>
+    </div>
+    <div class="panel"><h2>科目別</h2><div class="table-wrap"><table><thead><tr><th>科目</th><th class="num">テーマ</th><th class="num">カードあり</th><th>カバー率（出題数で重み付け）</th></tr></thead><tbody>
+      ${cov.by_subject.map(b => `<tr><td>${esc(b.subject)}</td><td class="num">${b.themes}</td><td class="num">${b.covered}</td>
+        <td style="white-space:nowrap"><span class="meter"><i style="width:${(b.rate * 100).toFixed(1)}%"></i></span>${pct(b.rate)}</td></tr>`).join("")}
+    </tbody></table></div></div>
+    <div class="panel"><div class="row"><h2 style="margin:0">テーマ別（科目ごとによく出る順）</h2><span class="spacer"></span>
+      <label class="row" style="gap:6px"><input type="checkbox" id="onlyZero"> カードがないテーマだけ</label></div>
+      <p class="sub">カードの「系統」かタグがテーマ名と同じもの、またはそのテーマの過去問から作ったカードを数えています（同じ科目のカードだけ）。
+        追加画面の「系統」の候補にテーマ名が出るので、そこから選ぶと自動で数えられます。</p>
+      <div class="table-wrap"><table><thead><tr><th>科目</th><th>テーマ</th><th class="num">10年の出題</th><th class="num">出た回</th><th class="num">カード</th><th></th></tr></thead>
+        <tbody id="crows"></tbody></table></div></div></div>`));
+  const render = () => {
+    const only = el.querySelector("#onlyZero").checked;
+    el.querySelector("#crows").innerHTML = cov.themes.filter(t => !only || !t.cards).map(t => `<tr class="${t.cards ? "" : "zero"}">
+      <td>${esc(t.subject)}</td><td>${esc(t.theme)}</td><td class="num">${t.questions}問</td><td class="num">${t.years}/10回</td>
+      <td class="num">${t.cards ? `${t.cards}枚` : '<span class="r-again">0</span>'}</td>
+      <td style="white-space:nowrap"><a class="btn small" href="#/past?subject=${encodeURIComponent(t.subject)}&theme=${encodeURIComponent(t.theme)}">過去問を見る</a></td></tr>`).join("");
+  };
+  el.querySelector("#onlyZero").addEventListener("change", render);
+  render();
+}
+
 
 /* ---------- 今日 ---------- */
 async function pageToday() {
@@ -404,6 +563,10 @@ async function pageToday() {
       <div class="tile"><div class="label">全カード</div><div class="value">${d.total}<small>枚</small></div>
         <div class="note">未学習 ${d.unlearned}枚</div></div>
     </div>
+    ${d.memos || d.flagged || d.leech ? `<div class="panel row">
+      ${d.memos ? `<a class="btn" href="#/memos">メモ箱 <b>${d.memos}</b>件をカードにする</a>` : ""}
+      ${d.flagged ? `<a class="btn" href="#/cards?tag=${encodeURIComponent(META.flag_tag)}">あとで直す <b>${d.flagged}</b>枚</a>` : ""}
+      ${d.leech ? `<a class="btn" href="#/weak">要見直し <b>${d.leech}</b>枚</a>` : ""}</div>` : ""}
     <div class="panel">
       <div class="row">
         ${d.due_today ? `<a class="btn primary big" href="#/study">学習を始める（${d.due_today}枚）</a>` : `<button class="btn big" disabled>今日の期日はありません</button>`}
@@ -583,7 +746,7 @@ async function runStudy(params) {
     </div>
     <div class="progress"><i id="prog" style="width:0"></i></div>
     <div id="stage"></div>
-    <div class="hint-keys keys-only"><kbd>Space</kbd> 次の穴を開ける／答えを表示　<kbd>Enter</kbd> 全部表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集</div>
+    <div class="hint-keys keys-only"><kbd>Space</kbd> 次の穴を開ける／答えを表示　<kbd>Enter</kbd> 全部表示　<kbd>1</kbd> ○　<kbd>2</kbd> △　<kbd>3</kbd> ✖　<kbd>E</kbd> 編集　<kbd>F</kbd> あとで直す</div>
   </div>`);
   $main.append(wrap);
 
@@ -642,7 +805,8 @@ async function runStudy(params) {
         ? ["good", "fair", "again"].map((r, i) => `<button class="btn rate ${r}" data-r="${r}">
               <span class="sym">${RATING[r].sym}</span><span class="when"><kbd>${i + 1}</kbd> ${nextWhen(r)}</span></button>`).join("")
         : `<span id="pre"></span>`}</div>
-      <div class="row" style="justify-content:center;margin-top:10px"><button class="btn small" id="edit">このカードを編集</button></div>
+      <div class="row" style="justify-content:center;margin-top:10px"><button class="btn small" id="edit">このカードを編集 <kbd>E</kbd></button>
+        <button class="btn small ${c.tags.includes(META.flag_tag) ? "flag-on" : ""}" id="flag">${c.tags.includes(META.flag_tag) ? "★ あとで直す（印を外す）" : "☆ あとで直す"} <kbd>F</kbd></button></div>
     </div>`));
     holes = [...stageEl.querySelectorAll(".q .cl, .q .mask")];
     if (revealed) holes.forEach(x => x.classList.add("open"));
@@ -650,6 +814,7 @@ async function runStudy(params) {
     if (!revealed) stageEl.querySelector(".flash").addEventListener("click", openNext);   // カードをタップすると次の穴
     stageEl.querySelectorAll("[data-r]").forEach(b => b.addEventListener("click", () => rate(b.dataset.r)));
     stageEl.querySelector("#edit").addEventListener("click", edit);
+    stageEl.querySelector("#flag").addEventListener("click", toggleFlag);
     stageEl.querySelectorAll(".q .card-img").forEach(im => im.addEventListener("error", () => im.replaceWith(h(`<span class="r-again">［画像が見つかりません］</span>`))));
     updateHoles();
   }
@@ -682,10 +847,23 @@ async function runStudy(params) {
     if (!current || !revealed || busy) return;
     busy = true;
     try {
-      await api("POST", "review", session ? { card_id: current.id, rating: r, session } : { card_id: current.id, rating: r });
+      const res = await api("POST", "review", session ? { card_id: current.id, rating: r, session } : { card_id: current.id, rating: r });
+      if (res.leech) toast(`✖ が${META.leech_threshold}回になったので「${META.leech_tag}」を付けました（苦手リストで作り直せます）`);
       doneCount++;
       await load();
     } catch (e) { fail(e); } finally { busy = false; }
+  }
+  async function toggleFlag() {   // 学習を止めずに「あとで直す」印を付け外し（開けた穴はそのまま）
+    if (!current) return;
+    const on = !current.tags.includes(META.flag_tag);
+    try {
+      const r = await api("POST", `cards/${current.id}/flag`, { on });
+      current.tags = r.tags;
+      const b = stageEl.querySelector("#flag");
+      b.classList.toggle("flag-on", on);
+      b.innerHTML = (on ? "★ あとで直す（印を外す）" : "☆ あとで直す") + " <kbd>F</kbd>";
+      toast(on ? "「あとで直す」を付けました（カード一覧のタグで探せます）" : "「あとで直す」を外しました");
+    } catch (e) { fail(e); }
   }
   function edit() {
     if (!current) return;
@@ -701,58 +879,90 @@ async function runStudy(params) {
     else if (e.key === "Enter" && !revealed) { e.preventDefault(); reveal(); }
     else if (["1", "2", "3"].includes(e.key)) { e.preventDefault(); rate(["good", "fair", "again"][+e.key - 1]); }
     else if (e.key === "e" || e.key === "E") { e.preventDefault(); edit(); }
+    else if (e.key === "f" || e.key === "F") { e.preventDefault(); toggleFlag(); }
   };
   await load();
 }
 
 /* ---------- 追加 ---------- */
 async function pageAdd(params) {
-  const mode = params.get("mode") === "bulk" ? "bulk" : "single";
-  const subject = store.get("subject", META.subjects[0]);
-  const unit = store.get("unit:" + subject, "");
+  const mode = ["bulk", "image"].includes(params.get("mode")) ? params.get("mode") : "single";
+  // メモ・過去問からの下書き
+  let prefill = null;
+  try {
+    if (params.get("memo")) {
+      const m = await api("GET", "memos/" + params.get("memo"));
+      prefill = { kind: "memo", memoId: m.id, subject: m.subject || null, front: m.text, back: "" };
+    } else if (params.get("past")) {
+      const d = await api("GET", `past/draft?id=${encodeURIComponent(params.get("past"))}&style=${params.get("style") || "qa"}`);
+      prefill = { kind: "past", ...d };
+    }
+  } catch (e) { fail(e); }
+  const subject = prefill?.subject || store.get("subject", META.subjects[0]);
+  const unit = prefill ? (prefill.unit ?? "") : store.get("unit:" + subject, "");
+  const tagsInit = prefill?.tags ? prefill.tags.join(" ") : store.get("addTags", "");
   $main.append(h(`<div>
     <div class="row" style="margin-bottom:16px"><h1 style="margin:0">カードを追加</h1>
-      <div class="seg"><button data-m="single" class="${mode === "single" ? "on" : ""}">1枚ずつ</button>
-      <button data-m="bulk" class="${mode === "bulk" ? "on" : ""}">まとめて（1行1枚）</button></div></div>
+      ${prefill ? `<span class="tag accent">${prefill.kind === "memo" ? "メモから作成" : "過去問から作成"}</span>
+        <button class="btn small" id="backBtn">戻る</button>` : `<div class="seg"><button data-m="single" class="${mode === "single" ? "on" : ""}">1枚ずつ</button>
+      <button data-m="image" class="${mode === "image" ? "on" : ""}">画像から作る</button>
+      <button data-m="bulk" class="${mode === "bulk" ? "on" : ""}">まとめて（1行1枚）</button></div>`}</div>
+    ${prefill?.notes?.length ? `<div class="panel notice">${prefill.notes.map(n => `<div>${esc(n)}</div>`).join("")}</div>` : ""}
+    ${prefill?.kind === "memo" ? `<div class="panel notice">保存すると、このメモはメモ箱から消えます。</div>` : ""}
     <div class="panel"><div class="form-grid" style="margin-bottom:12px">
       <label class="field">科目<select id="subject">${subjectOptions(subject)}</select></label>
       <label class="field">系統・単元（任意）<input type="text" id="unit" list="units" value="${esc(unit)}" placeholder="例：自律神経系"><datalist id="units"></datalist></label>
-      <label class="field" style="grid-column:1/-1">タグ（任意・スペース区切りで複数）<input type="text" id="tags" value="${esc(store.get("addTags", ""))}" placeholder="例：頻出 計算 第110回"></label>
+      <label class="field" style="grid-column:1/-1">タグ（任意・スペース区切りで複数）<input type="text" id="tags" value="${esc(tagsInit)}" placeholder="例：頻出 計算 第110回"></label>
       <div class="chips" id="tagchips" style="grid-column:1/-1"></div>
     </div><div id="body"></div></div>
   </div>`));
-  $main.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => go("add", b.dataset.m === "bulk" ? { mode: "bulk" } : null)));
+  $main.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => go("add", b.dataset.m === "single" ? null : { mode: b.dataset.m })));
+  $main.querySelector("#backBtn")?.addEventListener("click", () => history.back());
   const $s = $main.querySelector("#subject"), $u = $main.querySelector("#unit"), $t = $main.querySelector("#tags");
-  $t.addEventListener("change", () => store.set("addTags", $t.value.trim()));
-  $t.addEventListener("input", () => store.set("addTags", $t.value.trim()));
-  const picker = await tagPicker($t, $main.querySelector("#tagchips"));
-  async function loadUnits() {
-    const list = await api("GET", "units?subject=" + encodeURIComponent($s.value)).catch(() => []);
-    $main.querySelector("#units").innerHTML = list.filter(x => x.unit).map(x => `<option value="${esc(x.unit)}">`).join("");
+  if (!prefill) {   // 下書きのときは、いつものタグの既定値を書き換えない
+    $t.addEventListener("change", () => store.set("addTags", $t.value.trim()));
+    $t.addEventListener("input", () => store.set("addTags", $t.value.trim()));
   }
-  $s.addEventListener("change", () => { store.set("subject", $s.value); $u.value = store.get("unit:" + $s.value, ""); loadUnits(); });
-  $u.addEventListener("change", () => store.set("unit:" + $s.value, $u.value.trim()));
+  const picker = await tagPicker($t, $main.querySelector("#tagchips"));
+  async function loadUnits() {   // 系統の候補 = 使ったことのある系統 ＋ 過去問の出題テーマ
+    const subj = encodeURIComponent($s.value);
+    const [list, themes] = await Promise.all([api("GET", "units?subject=" + subj).catch(() => []),
+      META.past_available ? api("GET", "past/themes?subject=" + subj).catch(() => []) : []]);
+    const names = [...new Set([...list.filter(x => x.unit).map(x => x.unit), ...themes.map(t => t.theme)])];
+    $main.querySelector("#units").innerHTML = names.map(n => `<option value="${esc(n)}">`).join("");
+  }
+  $s.addEventListener("change", () => { if (!prefill) { store.set("subject", $s.value); $u.value = store.get("unit:" + $s.value, ""); } loadUnits(); });
+  $u.addEventListener("change", () => { if (!prefill) store.set("unit:" + $s.value, $u.value.trim()); });
   loadUnits();
   const body = $main.querySelector("#body");
-  if (mode === "single") addSingle(body, $s, $u, $t, picker); else addBulk(body, $s, $u, $t, picker);
+  if (prefill || mode === "single") addSingle(body, $s, $u, $t, picker, prefill);
+  else if (mode === "image") addImageCards(body, $s, $u, $t, picker);
+  else addBulk(body, $s, $u, $t, picker);
 }
 
-function addSingle(body, $s, $u, $t, picker) {
+function addSingle(body, $s, $u, $t, picker, prefill = null) {
   body.append(h(`<div>
     <div class="cf"></div>
     <div class="row" style="margin-top:12px"><button class="btn primary" id="save">追加する <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
       <span class="sub">追加したカードは今日が期日になります。追加後も科目と系統はそのまま残ります。</span></div>
     <div id="recent" style="margin-top:16px"></div>
   </div>`));
-  const form = cardForm(body.querySelector(".cf"));
+  const form = cardForm(body.querySelector(".cf"), prefill ? { front: prefill.front, back: prefill.back } : {});
   const added = [];
   let saving = false;
   async function save() {
     if (saving) return;
     saving = true;
     try {
-      store.set("unit:" + $s.value, $u.value.trim());
-      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, tags: $t.value, ...form.get() });
+      if (!prefill) store.set("unit:" + $s.value, $u.value.trim());
+      const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, tags: $t.value, ...form.get(),
+        ...(prefill?.source ? { source: prefill.source } : {}) });
+      if (prefill) {   // 下書きから作ったら、元の画面（メモ箱・過去問）に戻る
+        if (prefill.kind === "memo") await api("DELETE", "memos/" + prefill.memoId).catch(() => {});
+        toast(prefill.kind === "memo" ? "カードを追加し、メモを消しました" : "過去問からカードを追加しました");
+        history.back();
+        return;
+      }
       picker.refresh();
       added.unshift(c);
       form.reset(); form.focus();
@@ -775,6 +985,73 @@ function addSingle(body, $s, $u, $t, picker) {
   // 画面のどこにいても Ctrl+Enter で追加（画像の穴の編集を閉じた直後なども）
   keyHandler = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); } };
   form.focus();
+}
+
+function addImageCards(body, $s, $u, $t, picker) {
+  body.append(h(`<div>
+    <label class="field">問いの文（画像の上に表示。前回の文を使います）
+      <input type="text" id="iq" value="${esc(store.get("imageQuestion", "隠れた部分を答えよ"))}"></label>
+    <div class="dropzone" id="dz" tabindex="0">
+      <div class="dz-big">ここで <kbd>Ctrl</kbd>+<kbd>V</kbd>（スクリーンショットを貼り付け）</div>
+      <div class="sub">画像ファイルをここにドラッグするか、クリック（タップ）して選ぶこともできます。<br>
+        貼り付けると穴の編集画面が開きます。隠したい部分に四角形を描いて「完了」を押すと、そのままカードとして保存されます。</div>
+    </div>
+    <input type="file" id="ifile" accept="image/*" hidden>
+    <div id="recent" style="margin-top:16px"></div>
+  </div>`));
+  const $q = body.querySelector("#iq"), $dz = body.querySelector("#dz"), $file = body.querySelector("#ifile");
+  $q.addEventListener("input", () => store.set("imageQuestion", $q.value));
+  const added = [];
+  let busy = false;
+  async function fromFile(file) {
+    if (busy || !file) return;
+    busy = true;
+    try {
+      toast("画像を取り込み中…");
+      const id = await uploadImage(file);
+      openMaskEditor(id, [], async rects => {
+        if (!rects.length) { toast("穴がないので保存しませんでした（四角形を1つ以上描いてください）", true); return; }
+        try {
+          const front = ($q.value.trim() ? $q.value.trim() + "\n" : "") + `[[img:${id}]]`;
+          const c = await api("POST", "cards", { subject: $s.value, unit: $u.value, tags: $t.value, front, back: "", masks: { [id]: rects } });
+          store.set("unit:" + $s.value, $u.value.trim());
+          added.unshift(c);
+          picker.refresh();
+          toast(`画像カードを追加しました（穴 ${rects.length}個）`);
+          renderRecent();
+        } catch (e) { fail(e); }
+      });
+    } catch (e) { fail(e); } finally { busy = false; }
+  }
+  function renderRecent() {
+    const el = body.querySelector("#recent");
+    el.innerHTML = added.length ? `<h2>今追加したカード（${added.length}枚）</h2><div class="table-wrap"><table><tbody>
+      ${added.slice(0, 10).map(c => `<tr><td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td>
+        <td class="front-cell">${esc(c.front_plain)}</td><td><button class="btn small" data-id="${c.id}">編集</button></td></tr>`).join("")}</tbody></table></div>` : "";
+    el.querySelectorAll("[data-id]").forEach(b => b.addEventListener("click", () => openEditor(+b.dataset.id, async ch => {
+      const i = added.findIndex(x => x.id === +b.dataset.id);
+      if (ch === "deleted") added.splice(i, 1); else added[i] = await api("GET", "cards/" + b.dataset.id);
+      renderRecent();
+    })));
+  }
+  // 画面のどこで貼り付けても受け付ける（入力欄で文字を貼る場合を除く）
+  const onPaste = e => {
+    if (!document.body.contains($dz)) { document.removeEventListener("paste", onPaste); return; }
+    if (document.querySelector("dialog[open]")) return;
+    const files = imageFiles(e.clipboardData && e.clipboardData.files);
+    if (files.length) { e.preventDefault(); fromFile(files[0]); }
+  };
+  document.addEventListener("paste", onPaste);
+  $dz.addEventListener("click", () => $file.click());
+  $file.addEventListener("change", () => { fromFile($file.files[0]); $file.value = ""; });
+  $dz.addEventListener("dragover", e => { e.preventDefault(); $dz.classList.add("drop"); });
+  $dz.addEventListener("dragleave", () => $dz.classList.remove("drop"));
+  $dz.addEventListener("drop", e => {
+    e.preventDefault(); $dz.classList.remove("drop");
+    const files = imageFiles(e.dataTransfer && e.dataTransfer.files);
+    if (files.length) fromFile(files[0]);
+  });
+  $dz.focus();
 }
 
 function thumbTag(c) {
@@ -919,6 +1196,7 @@ async function openEditor(id, onChange) {
         </tbody></table></div>` : `<p class="muted">まだ評価していません</p>`}
     </div>
     <div class="mf"><button class="btn primary" value="save" id="esave">保存 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
+      ${c.tags.includes(META.flag_tag) || c.tags.includes(META.leech_tag) ? `<button class="btn" type="button" id="efixed">${c.tags.includes(META.leech_tag) ? "作り直した" : "直した"}（印を外して保存）</button>` : ""}
       <span class="spacer"></span>
       <button class="btn" type="button" id="ereset">学習状況をリセット</button>
       <button class="btn danger" type="button" id="edel">削除</button></div></form>`;
@@ -935,6 +1213,10 @@ async function openEditor(id, onChange) {
   form.addEventListener("submit", e => { if (e.submitter && e.submitter.value === "save") { e.preventDefault(); save(); } });
   form.addEventListener("keydown", e => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+  });
+  dlg.querySelector("#efixed")?.addEventListener("click", () => {
+    form.tags.value = splitTags(form.tags.value).filter(t => t !== META.flag_tag && t !== META.leech_tag).join(" ");
+    save();
   });
   dlg.querySelector("#ereset").addEventListener("click", async () => {
     if (!confirm("このカードを新規に戻し、今日を期日にします。\n評価の履歴は残りますが、集計（周回数・○△✖・定着率）には数えなくなります。よろしいですか？")) return;
@@ -995,7 +1277,7 @@ async function pageWeak(params) {
   const days = +(params.get("days") || 14), min = +(params.get("min") || 2);
   const w = await api("GET", `weak?days=${days}&min=${min}`);
   const seg = (name, cur, list) => `<div class="seg">${list.map(([v, l]) => `<button data-${name}="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("")}</div>`;
-  $main.append(h(`<div>
+  $main.append(h(`<div class="weak-wrap">
     <div class="row" style="margin-bottom:12px"><h1 style="margin:0">苦手リスト</h1>
       <span class="sub">${fmtDate(w.start)}〜${fmtDate(w.end)} の評価から（再確認の✖は数えません）</span></div>
     <div class="row" style="margin-bottom:16px">期間 ${seg("days", days, [[7, "7日"], [14, "14日"], [30, "30日"]])}
@@ -1012,6 +1294,18 @@ async function pageWeak(params) {
           <td style="white-space:nowrap"><span class="meter"><i style="width:${(u.again_rate * 100).toFixed(1)}%;background:var(--again)"></i></span>${pct(u.again_rate)}</td>
           <td><a class="btn small" href="#/cards?subject=${encodeURIComponent(u.subject)}&unit=${encodeURIComponent(u.unit)}">一覧</a></td></tr>`).join("")}
         </tbody></table></div>` : `<p class="empty">この期間に✖はありません</p>`}</div></div>`));
+  const leech = await api("GET", "cards?limit=200&sort=updated&tag=" + encodeURIComponent(META.leech_tag)).catch(() => ({ items: [] }));
+  $main.querySelector(".weak-wrap").append(h(`<div class="panel"><h2>覚えにくいカード（「${esc(META.leech_tag)}」${leech.items.length}枚）</h2>
+    <p class="sub">✖ が通算${META.leech_threshold}回になったカードに自動で付きます（再確認と練習の ✖ は数えません）。何度も間違えるカードは、覚え方より<b>カードの作り方</b>に原因があることが多いので、作り直してみてください。</p>
+    <ul class="tips"><li><b>1枚に1つのことだけ</b>：答えが複数あるなら、カードを分ける（例：「副作用を3つ」→ 1つずつ）</li>
+      <li><b>手がかりを足す</b>：ヒント {{c1::語句::ヒント}}、語呂合わせ、理由（なぜそうなるか）を裏面に書く</li>
+      <li><b>似たものと区別する</b>：取り違える相手（例：β1 と β2）を並べた表や画像のカードを作る</li>
+      <li><b>画像で覚える</b>：構造式・図・表は、画像の穴埋めにする</li>
+      <li>作り直したら、編集画面の「作り直した（印を外して保存）」を押すと、そこから ✖ を数え直します</li></ul>
+    ${leech.items.length ? `<div class="table-wrap"><table><thead><tr><th></th><th>科目</th><th>系統</th><th>表面</th><th>間隔</th></tr></thead><tbody>
+      ${leech.items.map(c => `<tr class="clickable" data-id="${c.id}"><td class="thumb-cell">${thumbTag(c)}</td><td>${esc(c.subject)}</td><td>${esc(c.unit)}</td>
+        <td class="front-cell">${esc(c.front_plain)}</td><td>${intervalLabel(c.stage)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">今はありません</p>`}
+  </div>`));
   $main.querySelectorAll("[data-days]").forEach(b => b.addEventListener("click", () => go("weak", { days: b.dataset.days, min })));
   $main.querySelectorAll("[data-min]").forEach(b => b.addEventListener("click", () => go("weak", { days, min: b.dataset.min })));
   $main.querySelectorAll("tr[data-id]").forEach(tr => tr.addEventListener("click", () => openEditor(+tr.dataset.id, () => route())));

@@ -399,7 +399,7 @@ function renderGibson(b, bp, ctx) {
   const table = `<table class="grid gib-t"><tr class="hr"><td></td><td>断片名</td><td>長さ<br>(bp)</td><td>分子量<br>(g/mol)</td><td>質量<br>(ng)</td><td>モル<br>(pmol)</td><td>濃度<br>(ng/uL)</td><td>必要量<br>(uL)</td>${multCol ? `<td>×${esc(fmtNum(g.mult))}<br>(uL)</td>` : ''}</tr>${trs}</table>`;
   // 断片（サンプル）＝vector＋insert＋stMilliQ、断片（Control）＝vector＋stMilliQ。どちらも合計 g.max uL
   const water = esc(b.water || 'stMilliQ');
-  const mix = (title, rows) => {
+  const mix = (title, rows, dryKey) => {
     const ready = rows.every(r => !isNaN(r.vol));
     const sum = rows.reduce((a, r) => a + (isNaN(r.vol) ? 0 : r.vol), 0);
     const over = ready && sum > g.max + 1e-9;
@@ -407,10 +407,25 @@ function renderGibson(b, bp, ctx) {
     const tr = rows.map(r => `<tr><td class="nm">・${nm(r)}</td><td>：</td><td class="amt">${calc(f2(r.vol))}uL</td></tr>`).join('')
       + `<tr><td class="nm">・${water}</td><td>：</td><td class="amt">${ready && !over ? calc(f2(g.max - sum)) : calc('')}uL</td></tr>`
       + `<tr class="total"><td class="nm">　Total</td><td>：</td><td class="amt">${esc(fmtNum(g.max))}uL</td></tr>`;
-    const warn = over ? `<div class="gib-msg red">断片の合計が ${f2(sum)} uL で ${esc(fmtNum(g.max))} uL を超えています。減圧乾燥で濃縮してから ${water} で ${esc(fmtNum(g.max))} uL にしてください。</div>` : '';
-    return `<div class="gib-mix"><div>〈${title}〉</div><table class="mat-t">${tr}</table>${warn}</div>`;
+    const warn = over ? `<div class="gib-msg red">断片の合計が ${f2(sum)} uL で ${esc(fmtNum(g.max))} uL を超えるため、減圧乾燥で濃縮します。</div>` : '';
+    // 減圧乾燥が必要なとき：操作手順と、乾燥後の液量（自分で入力）から stMilliQ を計算した表を続けて出す
+    let dry = '';
+    if (over) {
+      const dv = num(b[dryKey]);
+      const what = rows.length > 1 ? 'vector と insert' : 'vector';
+      const left = g.max - dv;
+      const bad = !isNaN(dv) && left < -1e-9;
+      dry = `<div class="gib-flow">↓</div><div class="gib-step">・${rows.length > 1 ? `${what}を混ぜて減圧乾燥` : `${what}を減圧乾燥`}（${field(`${bp}.${dryKey}`, b[dryKey], '液量', '3.5em')} uL まで）</div>
+        <div class="gib-flow">↓</div>
+        <div>〈${title}・減圧乾燥後〉</div><table class="mat-t">
+          <tr><td class="nm">・${rows.length > 1 ? 'vector＋insert' : 'vector'}（減圧乾燥後）</td><td>：</td><td class="amt">${isNaN(dv) ? calc('') : calc(f2(dv))}uL</td></tr>
+          <tr><td class="nm">・${water}</td><td>：</td><td class="amt">${isNaN(dv) || bad ? calc('') : calc(f2(left))}uL</td></tr>
+          <tr class="total"><td class="nm">　Total</td><td>：</td><td class="amt">${esc(fmtNum(g.max))}uL</td></tr></table>
+        ${bad ? `<div class="gib-msg red">乾燥後の液量が ${esc(fmtNum(g.max))} uL を超えています。もう少し乾燥させてください。</div>` : ''}`;
+    }
+    return `<div class="gib-mix"><div>〈${title}〉</div><table class="mat-t">${tr}</table>${warn}${dry}</div>`;
   };
-  const mixes = `<div class="gib-mixes">${mix('断片（サンプル）', g.rows)}${b.control !== false ? mix('断片（Control）', g.rows.slice(0, 1)) : ''}</div>`;
+  const mixes = `<div class="gib-mixes">${mix('断片（サンプル）', g.rows, 'dry_s')}${b.control !== false ? mix('断片（Control）', g.rows.slice(0, 1), 'dry_c') : ''}</div>`;
   const mm = b.mm_show !== false ? `<div class="gib-mm">${renderMaterials(b.mm, `${bp}.mm`, ctx)}</div>` : '';
   return `<div class="gib">${head}${table}${mixes}${mm}</div>` + (ctx.mode === 'fill' ? `<details class="fig-ed no-print"><summary>この表を編集（insert の数・比率・倍量・Master mix など）</summary>${gibEdHtml(b, bp)}</details>` : '');
 }
@@ -621,17 +636,31 @@ function wrapSel(before, after, placeholder, el = lastField) {
 }
 // キーボードショートカット（編集欄の中で有効）
 //   Ctrl+B 太字 / Ctrl+U 下線 / Ctrl+Alt+H 強調(黄) / Ctrl+Alt+R 注意(赤) / Ctrl+Alt+V 可変欄
-const SHORTCUTS = { 'ctrl+KeyB': 'b', 'ctrl+KeyU': 'u', 'ctrl+alt+KeyH': 'hl', 'ctrl+alt+KeyR': 'red', 'ctrl+alt+KeyV': 'var' };
+//   Ctrl+Alt+K 枠囲み / Ctrl+Shift+= 上付き / Ctrl+Shift++ 下付き（日本語キーボード）
+const SHORTCUTS = { 'ctrl+KeyB': 'b', 'ctrl+KeyU': 'u', 'ctrl+alt+KeyH': 'hl', 'ctrl+alt+KeyR': 'red', 'ctrl+alt+KeyV': 'var', 'ctrl+alt+KeyK': 'box' };
+const SHIFT_SHORTCUTS = { '=': 'sup', '+': 'sub' };
 document.addEventListener('keydown', e => {
-  if (e.isComposing || !(e.ctrlKey || e.metaKey) || e.shiftKey) return;
+  if (e.isComposing || !(e.ctrlKey || e.metaKey)) return;
   const el = e.target;
   if (!el.matches || !el.matches('.blk textarea, .blk input[type=text], .meta input[type=text], .meta textarea')) return;
-  const k = SHORTCUTS[(e.altKey ? 'ctrl+alt+' : 'ctrl+') + e.code];
+  const k = e.shiftKey ? (!e.altKey && SHIFT_SHORTCUTS[e.key]) : SHORTCUTS[(e.altKey ? 'ctrl+alt+' : 'ctrl+') + e.code];
   if (!k) return;
   e.preventDefault();
   lastField = el;
   wrapSel(...MARKS[k], el);
 });
+// ブロックごとの小さい書式ボタン（そのブロックの欄に書式を付ける）
+function markupBarMini() {
+  return `<div class="mk mk-mini"><span class="muted">書式：</span>
+    <button type="button" data-mk="var" title="可変欄 [[ ]]（Ctrl+Alt+V）">可変欄</button>
+    <button type="button" data-mk="b" title="太字（Ctrl+B）"><b>太</b></button>
+    <button type="button" data-mk="u" title="下線（Ctrl+U）"><u>下線</u></button>
+    <button type="button" data-mk="hl" style="background:#fff200" title="強調(黄)（Ctrl+Alt+H）">黄</button>
+    <button type="button" data-mk="red" style="color:#e00000" title="注意(赤)（Ctrl+Alt+R）">赤</button>
+    <button type="button" data-mk="box" title="枠囲み（Ctrl+Alt+K）"><span style="border:1px solid #333;padding:0 2px">枠</span></button>
+    <button type="button" data-mk="sup" title="上付き（Ctrl+Shift+=）">x<sup>2</sup></button>
+    <button type="button" data-mk="sub" title="下付き（Ctrl+Shift++）">x<sub>2</sub></button></div>`;
+}
 function markupBar() {
   return `<div class="mk"><span class="muted">選んだ文字に書式：</span>
     <button type="button" data-mk="var" title="毎回変わる欄。[[ラベル]] または [[ラベル=既定値]]（Ctrl+Alt+V）">可変欄 [[ ]] <span class="kbd">Ctrl+Alt+V</span></button>
@@ -639,13 +668,16 @@ function markupBar() {
     <button type="button" data-mk="u" title="Ctrl+U"><u>下線</u> <span class="kbd">Ctrl+U</span></button>
     <button type="button" data-mk="hl" style="background:#fff200" title="Ctrl+Alt+H">強調(黄) <span class="kbd">Ctrl+Alt+H</span></button>
     <button type="button" data-mk="red" style="color:#e00000" title="Ctrl+Alt+R">注意(赤) <span class="kbd">Ctrl+Alt+R</span></button>
-    <button type="button" data-mk="box">枠囲み</button>
-    <button type="button" data-mk="sup">上付き x<sup>2</sup></button>
-    <button type="button" data-mk="sub">下付き x<sub>2</sub></button></div>`;
+    <button type="button" data-mk="box" title="Ctrl+Alt+K">枠囲み <span class="kbd">Ctrl+Alt+K</span></button>
+    <button type="button" data-mk="sup" title="Ctrl+Shift+=">上付き x<sup>2</sup> <span class="kbd">Ctrl+Shift+=</span></button>
+    <button type="button" data-mk="sub" title="Ctrl+Shift++">下付き x<sub>2</sub> <span class="kbd">Ctrl+Shift++</span></button></div>`;
 }
 function bindMarkupBar(root) {
   root.querySelectorAll('[data-mk]').forEach(btn => btn.onmousedown = e => {
     e.preventDefault();
+    // ブロックの中のボタンは、そのブロックの欄に付ける（最後にクリックした欄が別のブロックなら知らせる）
+    const blk = btn.closest('.blk');
+    if (blk && !(lastField && blk.contains(lastField))) { alert('先に、このブロックの中で書式を付けたい文字を選んでください。'); return; }
     wrapSel(...MARKS[btn.dataset.mk]);
   });
 }
@@ -730,14 +762,14 @@ function blockEditorHtml(b, i, n) {
     <button type="button" class="small" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
     <button type="button" class="small" data-act="down" data-i="${i}" ${i === n - 1 ? 'disabled' : ''}>↓</button>
     <button type="button" class="small" data-act="dup" data-i="${i}">複製</button>
-    <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${body}
+    <button type="button" class="small danger" data-act="del" data-i="${i}">削除</button></div>${b.type === 'pagebreak' ? '' : markupBarMini()}${body}
     <div class="addbar" style="margin:6px 0 0"><span class="muted">この下に追加：</span>${Object.entries(BLOCK_TYPES).map(([k, v]) => `<button type="button" class="small" data-act="add" data-type="${k}" data-at="${i + 1}">${v}</button>`).join('')}</div></div>`;
 }
 function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {}) {
   const render = () => {
     el.innerHTML = `
       ${withMeta ? `<div class="card meta"><div class="row">一覧での名前 ${inp('name', doc.name, '例：PCR（温度Gradient）', '260px')}
-        よみがな ${inp('kana', doc.kana, '例：せいげんこうそしょり（50音順の並べ替え・検索用）', '200px')}
+        よみがな ${inp('kana', doc.kana, '日本語の名前なら自動で入る（英語の名前は自分で入力）', '220px')}
         フォルダ <select data-bind="folder">${FOLDERS.map(f => `<option ${doc.folder === f ? 'selected' : ''}>${f}</option>`).join('')}${FOLDERS.includes(doc.folder) ? '' : '<option value="" selected>未分類</option>'}</select></div></div>` : ''}
       <div class="card meta"><div class="row" style="width:100%">印刷タイトル ${inp('title', doc.title, '●の後ろに入る題名', '360px')}</div>
         ${withMeta ? `<div class="row" style="margin-top:8px">タグ <span id="pe-tags">${tagBoxHtml(doc.tags || [])}</span></div>
@@ -757,10 +789,23 @@ function mountEditor(el, doc, onChange, { withMeta = true, onTags = null } = {})
   };
   if (!doc.memo) doc.memo = { text: '', print: false };
   render();
+  let kanaT;
+  const fillKana = async () => {
+    if (doc.kana_manual) return;
+    const k = await autoKana(doc.name || '');
+    if (doc.kana_manual) return;
+    doc.kana = k;
+    const ki = el.querySelector('input[data-bind="kana"]');
+    if (ki && document.activeElement !== ki) ki.value = k;
+    onChange();
+  };
+  if (withMeta && !doc.kana && hasJa(doc.name)) fillKana();
   el.oninput = el.onchange = e => {
     const t = e.target;
     if (!t.dataset.bind) return;
     applyBind(doc, t);
+    if (t.dataset.bind === 'name' && e.type === 'input') { clearTimeout(kanaT); kanaT = setTimeout(fillKana, 400); }
+    if (t.dataset.bind === 'kana' && e.type === 'input') doc.kana_manual = !!t.value.trim();   // 自分で直したら自動で上書きしない（空にすると自動に戻る）
     if (t.dataset.live) { refreshGelPreview(el, doc, t); bindGelDrag(el, doc, () => { render(); onChange(); }); }
     if (e.type === 'change' && (t.tagName === 'SELECT' || t.dataset.resize || t.dataset.live || t.dataset.rerender)) render();
     onChange();
@@ -2163,6 +2208,21 @@ function protocolOptions(ps) {
 }
 function loadFolderOpen() { try { return JSON.parse(localStorage.getItem('jn_folders_closed') || '[]'); } catch (e) { return []; } }
 function saveFolderOpen(closed) { try { localStorage.setItem('jn_folders_closed', JSON.stringify(closed)); } catch (e) { /* 保存できなくても使える */ } }
+// ---------- よみがな（日本語の名前から自動で作る。辞書 kuromoji を同梱） ----------
+let kuroP = null;
+function getKuro() {
+  if (!kuroP) kuroP = loadScript('/vendor/kuromoji/kuromoji.js').then(() => new Promise((ok, ng) => kuromoji.builder({ dicPath: '/vendor/kuromoji/dict/' }).build((e, t) => e ? ng(e) : ok(t))));
+  return kuroP;
+}
+const hasJa = t => /[\u3040-\u30ff\u3400-\u9fff々〆ヵヶ]/.test(String(t || ''));
+const toHira = t => String(t).replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+async function autoKana(name) {
+  if (!hasJa(name)) return '';   // 英語などの名前は自分で入れる
+  try {
+    const tk = await getKuro();
+    return toHira(tk.tokenize(String(name)).map(k => (k.reading && k.reading !== '*') ? k.reading : k.surface_form).join('')).replace(/\s+/g, '');
+  } catch (e) { return ''; }
+}
 // プロトコルの並べ替え（PCごとに覚える）
 const PSORTS = {
   manual: ['自分で決めた順（↑↓で並べ替え）', null],
@@ -2181,6 +2241,10 @@ const normQ = t => String(t || '').normalize('NFKC').toLowerCase().replace(/[ァ
 async function viewProtocols() {
   const all = await api.get('protocols');
   const sortKey = loadPSort();
+  if (sortKey === 'name' || protoQuery.trim()) {
+    // よみがなが未入力の日本語の名前は、その場で読みを作って並べる（保存は編集画面で）
+    for (const p of all) if (!p.kana && hasJa(p.name)) p.kana = await autoKana(p.name);
+  }
   const q = normQ(protoQuery.trim());
   let ps = q ? all.filter(p => q.split(/\s+/).every(w => normQ(p.name).includes(w) || normQ(p.kana).includes(w) || normQ(p.folder).includes(w))) : all.slice();
   if (PSORTS[sortKey][1]) ps.sort(PSORTS[sortKey][1]);
@@ -2606,11 +2670,13 @@ async function viewPrint(id) {
   const r = await api.get('records/' + id);
   const rec = r.data;
   $app.innerHTML = `<div class="toolbar no-print"><div class="row"><h2 style="margin:0">印刷プレビュー</h2><span class="muted">${esc(rec.protocol_name)}　記録 No.${id}</span><span class="spacer"></span>
+      <span class="colorsel">色 <label><input type="radio" name="pcolor" value="color" ${rec.opts.mono ? '' : 'checked'}> カラー</label><label><input type="radio" name="pcolor" value="mono" ${rec.opts.mono ? 'checked' : ''}> 白黒向け</label></span>
       <button id="undo" disabled>元に戻す</button> <button id="unrow">横並びをすべて解除</button>
       <a class="btn" href="#/record/${id}">← 入力に戻る</a> <button class="primary big" id="pr">印刷する</button></div>
       <div class="muted" style="margin-top:6px">ブロックをドラッグすると動かせます：ほかのブロックの<b>右側の空き</b>に落とすと横に並び（幅が入るときだけ）、<b>上半分・下半分</b>に落とすとその上・下へ移ります。ブロックの<b>右端</b>をドラッグすると幅（画像は大きさ）を変えられます（右端をダブルクリックで元に戻す）。並べ方はこの記録に保存されます。<br>
       印刷画面では「用紙サイズ：A4」「倍率：100%（既定）」「余白：既定」にし、「ヘッダーとフッター」のチェックを外してください。切りたい場所を変えたいときは「改ページ」ブロックを入れてください。</div></div>
-    <div class="pages dragmode" id="pages"><div class="muted">ページを組み立て中…</div></div>`;
+    <div class="color-help no-print" id="colorhelp"></div>
+    <div class="pages dragmode${rec.opts.mono ? ' mono' : ''}" id="pages"><div class="muted">ページを組み立て中…</div></div>`;
   const pagesEl = document.getElementById('pages');
   const opts = () => ({ mode: 'print', date: rec.opts.date ? rec.exp_date : '', memo: rec.opts.memo, chem: rec.opts.chem !== false, cut: !!rec.opts.cut });
   const undo = [];   // 動かす前の並び
@@ -2633,6 +2699,20 @@ async function viewPrint(id) {
   };
   undoBtn.onclick = async () => { if (!undo.length) return; rec.doc.blocks = undo.pop(); await saveAndDraw(); toast('元に戻しました'); };
   document.getElementById('unrow').onclick = async () => { undo.push(clone(rec.doc.blocks)); rec.doc.blocks.forEach(b => delete b.beside); await saveAndDraw(); toast('横並びを解除しました'); };
+  // 色：カラーで印刷するときは印刷画面の設定を案内。白黒向けは、黄色の強調を灰色・赤字を太字＋下線にする
+  const colorHelp = () => {
+    document.getElementById('colorhelp').innerHTML = rec.opts.mono
+      ? '<b>白黒向け</b>：黄色の強調は灰色の網かけ、赤字は黒の太字＋波線で印刷します（白黒プリンターでも区別できます）。'
+      : '<b>カラーで印刷するには</b>：印刷画面で <b>「カラー」を「カラー」</b> にしてください（見当たらないときは「詳細設定」を開く。「白黒」になっていると色が付きません）。プリンターによっては「プリンターのプロパティ（システムダイアログを使用して印刷）」の中で「カラー」を選びます。';
+  };
+  colorHelp();
+  document.querySelectorAll('input[name=pcolor]').forEach(rb => rb.onchange = async () => {
+    rec.opts.mono = rb.value === 'mono' && rb.checked;
+    pagesEl.classList.toggle('mono', !!rec.opts.mono);
+    colorHelp();
+    const u = await putWithCheck('records/' + id, rec, r.updated);
+    if (u) r.updated = u;
+  });
   await draw();
   document.getElementById('pr').onclick = () => window.print();
   pollFn = sameView(async () => { const r2 = await quietGet('records/' + id); if (r2.updated !== r.updated) await rerenderKeepScroll(() => viewPrint(id)); });
